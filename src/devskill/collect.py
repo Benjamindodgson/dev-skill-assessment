@@ -147,13 +147,20 @@ def _list_prs(
     until_iso: str,
     progress_callback: Optional[Callable[[str, int], None]] = None,
 ) -> List[Dict[str, Any]]:
-    # GraphQL query for PRs with reviews and timeline counts
+    # Use GraphQL search with created date range to avoid over-fetching
+    # GitHub search syntax: type:pr repo:owner/repo created:YYYY-MM-DD..YYYY-MM-DD
+    # We page through search results and then hydrate minimal PR fields via node selection
+    # Normalize ISO strings to date portion (UTC) for the search range
+    since_day = since_iso[:10]
+    until_day = until_iso[:10]
+
+    search_query = f"type:pr repo:{owner}/{repo} created:{since_day}..{until_day}"
     query = """
-    query($owner: String!, $repo: String!, $cursor: String) {
-      repository(owner: $owner, name: $repo) {
-        pullRequests(first: 50, after: $cursor, orderBy: {field: CREATED_AT, direction: DESC}, states: [OPEN, MERGED, CLOSED]) {
-          edges {
-            node {
+    query($q: String!, $cursor: String) {
+      search(query: $q, type: ISSUE, first: 50, after: $cursor) {
+        edges {
+          node {
+            ... on PullRequest {
               number
               title
               state
@@ -178,26 +185,23 @@ def _list_prs(
               reviewRequests(first: 10) { totalCount }
             }
           }
-          pageInfo { hasNextPage endCursor }
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
     """
 
-    # Paginate and then filter by timeframe client-side to avoid missing older pages if <90 days
-    variables = {
-        "owner": owner,
-        "repo": repo,
-    }
-    items = _paginate_graphql(query, variables, token, ["data", "repository", "pullRequests"], progress_callback)
-    since = dt.datetime.fromisoformat(since_iso)
-    until = dt.datetime.fromisoformat(until_iso)
-    filtered: List[Dict[str, Any]] = []
-    for pr in items:
-        created = dt.datetime.fromisoformat(pr["createdAt"].replace("Z", "+00:00"))
-        if since <= created <= until:
-            filtered.append(pr)
-    return filtered
+    variables = {"q": search_query}
+    items = _paginate_graphql(query, variables, token, ["data", "search"], progress_callback)
+
+    # Nodes can include non-PRs in theory, but we only selected PullRequest in fragment; filter defensively
+    prs: List[Dict[str, Any]] = []
+    for node in items:
+        if node and isinstance(node, dict) and (node.get("__typename") == "PullRequest" or "createdAt" in node):
+            prs.append(node)
+    if progress_callback:
+        progress_callback("complete", len(prs))
+    return prs
 
 
 def _list_commits(
