@@ -10,13 +10,24 @@ pip install git+https://github.com/Benjamindodgson/dev-skill-assessment.git
 
 ## Usage
 
-First, authenticate with GitHub CLI:
+### Interactive Mode (Recommended)
+
+Simply run devskill without any arguments for an interactive experience:
 
 ```bash
-gh auth login
+devskill
 ```
 
-Then run the assessment:
+The tool will guide you through:
+1. **Authentication** - Automatically checks if you're already authenticated with GitHub CLI or `GITHUB_TOKEN`
+2. **Repository Selection** - Lists all repositories you have access to (owned, collaborated, or organization repos)
+3. **Analysis Period** - Prompts for number of days to analyze (default: 90)
+4. **Output Directory** - Where to save reports (default: `reports`)
+5. **Config File** - Optional configuration file path
+
+### CLI Mode (For Automation)
+
+For scripting and CI/CD, use command-line arguments:
 
 ```bash
 devskill \
@@ -26,19 +37,20 @@ devskill \
   --config config.yml
 ```
 
-**Authentication:** The tool uses GitHub CLI authentication by default. For CI/automation, you can set `GITHUB_TOKEN` environment variable instead.
+**Authentication:** The tool uses GitHub CLI authentication by default. For CI/automation, you can set `GITHUB_TOKEN` environment variable instead. Run `gh auth login` to authenticate if needed.
 
+**CLI Arguments:**
 - `--repo-url`: accepts `owner/repo`, HTTPS, or SSH GitHub URLs
 - `--days`: time window (default 90)
 - `--outdir`: output directory (default `reports`)
-- `--config`: optional YAML for aliases/bots/weights (see `example-config.yml`)
+- `--config`: optional YAML for aliases/bots/weights (see `config.yml`)
 - `--no-cache`: disable local API response caching
 
 Outputs include repository and date in filenames, e.g. `dev-skill-assessment-OWNER-REPO-YYYY-MM-DD.md` and `dev-skill-assessment-insights-OWNER-REPO-YYYY-MM-DD.md`.
 
 ## Config YAML (optional)
 
-See `example-config.yml` for a complete configuration example. Basic structure:
+See `config.yml` for a complete configuration example. Basic structure:
 
 ```yaml
 # config.yml

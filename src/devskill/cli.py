@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 try:
     import yaml  # type: ignore
@@ -15,8 +15,10 @@ except Exception:  # pragma: no cover
 
 from . import collect, metrics, report, insights
 
+import requests
 
 REPO_RE = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+)(?:\.git)?$")
+GITHUB_GRAPHQL = "https://api.github.com/graphql"
 
 
 def parse_repo_input(s: str) -> Tuple[str, str]:
@@ -69,31 +71,235 @@ def _get_github_token() -> str:
     )
 
 
+def _get_github_username(token: str) -> str:
+    """Get the authenticated user's GitHub username."""
+    query = """
+    query {
+        viewer {
+            login
+        }
+    }
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    response = requests.post(
+        GITHUB_GRAPHQL,
+        json={"query": query},
+        headers=headers,
+        timeout=10
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data["data"]["viewer"]["login"]
+
+
+def _list_user_repos(token: str) -> List[Dict[str, Any]]:
+    """Fetch all repositories the authenticated user has access to via GitHub GraphQL API."""
+    repos = []
+    cursor = None
+    
+    while True:
+        after_clause = f', after: "{cursor}"' if cursor else ""
+        query = f"""
+        query {{
+            viewer {{
+                repositories(first: 100{after_clause}, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {{
+                    nodes {{
+                        owner {{
+                            login
+                        }}
+                        name
+                        description
+                    }}
+                    pageInfo {{
+                        hasNextPage
+                        endCursor
+                    }}
+                }}
+            }}
+        }}
+        """
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        
+        response = requests.post(
+            GITHUB_GRAPHQL,
+            json={"query": query},
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        nodes = data["data"]["viewer"]["repositories"]["nodes"]
+        repos.extend(nodes)
+        
+        page_info = data["data"]["viewer"]["repositories"]["pageInfo"]
+        if not page_info["hasNextPage"]:
+            break
+        cursor = page_info["endCursor"]
+    
+    return repos
+
+
+def _prompt_authentication() -> str:
+    """Prompt for GitHub authentication, checking if already authenticated."""
+    try:
+        token = _get_github_token()
+        username = _get_github_username(token)
+        print(f"✓ Already authenticated as {username}")
+        return token
+    except RuntimeError:
+        print("\n⚠️  GitHub authentication required")
+        print("Please authenticate using one of these methods:")
+        print("  1. GitHub CLI: gh auth login")
+        print("  2. Environment variable: export GITHUB_TOKEN=your_token")
+        print("\nPress Enter after authenticating...")
+        input()
+        # Retry after user authenticates
+        return _get_github_token()
+
+
+def _prompt_repo_selection(token: str) -> Tuple[str, str]:
+    """Display available repos and prompt user to select one."""
+    print("\nFetching your repositories...")
+    repos = _list_user_repos(token)
+    
+    if not repos:
+        print("No repositories found.")
+        sys.exit(1)
+    
+    print(f"\nFound {len(repos)} repositories:")
+    print("-" * 80)
+    
+    for idx, repo in enumerate(repos, 1):
+        owner = repo["owner"]["login"]
+        name = repo["name"]
+        description = repo["description"] or "No description"
+        # Truncate description if too long
+        if len(description) > 60:
+            description = description[:57] + "..."
+        print(f"{idx:4d}. {owner}/{name:30s} - {description}")
+    
+    print("-" * 80)
+    
+    while True:
+        try:
+            selection = input(f"\nSelect repository number (1-{len(repos)}): ").strip()
+            idx = int(selection) - 1
+            if 0 <= idx < len(repos):
+                selected = repos[idx]
+                owner = selected["owner"]["login"]
+                name = selected["name"]
+                print(f"✓ Selected: {owner}/{name}")
+                return owner, name
+            else:
+                print(f"Please enter a number between 1 and {len(repos)}")
+        except (ValueError, KeyboardInterrupt):
+            print("\nInvalid input. Please enter a number.")
+        except EOFError:
+            print("\nAborted.")
+            sys.exit(1)
+
+
+def _prompt_days() -> int:
+    """Prompt for number of days to analyze."""
+    while True:
+        try:
+            response = input("\nNumber of days to analyze [90]: ").strip()
+            if not response:
+                return 90
+            days = int(response)
+            if days > 0:
+                return days
+            print("Please enter a positive number.")
+        except ValueError:
+            print("Please enter a valid number.")
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.")
+            sys.exit(1)
+
+
+def _prompt_output_dir() -> str:
+    """Prompt for output directory."""
+    try:
+        response = input("\nOutput directory [reports]: ").strip()
+        return response if response else "reports"
+    except (KeyboardInterrupt, EOFError):
+        print("\nAborted.")
+        sys.exit(1)
+
+
+def _prompt_config_file() -> Any:
+    """Prompt for config file path."""
+    try:
+        response = input("\nConfig file path (press Enter to skip): ").strip()
+        return response if response else None
+    except (KeyboardInterrupt, EOFError):
+        print("\nAborted.")
+        sys.exit(1)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser("devskill")
-    p.add_argument("--repo-url", required=True, help="owner/repo or GitHub URL")
-    p.add_argument("--days", type=int, default=90)
-    p.add_argument("--outdir", default="reports")
-    p.add_argument("--config")
+    p.add_argument("--repo-url", required=False, help="owner/repo or GitHub URL")
+    p.add_argument("--days", type=int, default=None)
+    p.add_argument("--outdir", default=None)
+    p.add_argument("--config", default=None)
     p.add_argument("--no-cache", action="store_true")
     args = p.parse_args(argv)
 
-    owner, repo = parse_repo_input(args.repo_url.strip())
-    try:
-        token = _get_github_token()
-    except RuntimeError as e:
-        print(str(e), file=sys.stderr)
-        return 2
+    # Interactive mode: if no repo-url is provided
+    if args.repo_url is None:
+        print("=" * 80)
+        print("DevSkill Assessment - Interactive Mode")
+        print("=" * 80)
+        
+        # Prompt for authentication
+        try:
+            token = _prompt_authentication()
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        
+        # Prompt for repository selection
+        owner, repo = _prompt_repo_selection(token)
+        
+        # Prompt for other parameters
+        days = _prompt_days()
+        outdir = _prompt_output_dir()
+        config_path = _prompt_config_file()
+        
+        print("\n" + "=" * 80)
+        print("Starting assessment...")
+        print("=" * 80 + "\n")
+    else:
+        # CLI mode: use provided arguments
+        owner, repo = parse_repo_input(args.repo_url.strip())
+        try:
+            token = _get_github_token()
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            return 2
+        
+        days = args.days if args.days is not None else 90
+        outdir = args.outdir if args.outdir is not None else "reports"
+        config_path = args.config
 
     now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
-    since = now - dt.timedelta(days=args.days)
+    since = now - dt.timedelta(days=days)
     since_iso, until_iso = since.isoformat(), now.isoformat()
 
-    cfg = _load_config(args.config)
+    cfg = _load_config(config_path)
     bots = list(cfg.get("bots", []))
 
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
+    outdir_path = Path(outdir)
+    outdir_path.mkdir(parents=True, exist_ok=True)
 
     cache_dir = Path.cwd() / ".cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -111,7 +317,7 @@ def main(argv=None) -> int:
     )
 
     tag = f"{owner}-{repo}-{now:%Y-%m-%d}"
-    raw_path = outdir / f"dev-skill-raw-{tag}.json"
+    raw_path = outdir_path / f"dev-skill-raw-{tag}.json"
     with raw_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
     print(f"Wrote raw data → {raw_path}")
@@ -129,7 +335,7 @@ def main(argv=None) -> int:
     print("Generating reports...")
     report.generate_reports(
         scores=scores,
-        outdir=str(outdir),
+        outdir=str(outdir_path),
         owner=owner,
         repo=repo,
         since_iso=since_iso,
@@ -140,7 +346,7 @@ def main(argv=None) -> int:
     insights.generate_insights(
         scores=scores,
         data=data,
-        outdir=str(outdir),
+        outdir=str(outdir_path),
         owner=owner,
         repo=repo,
         since_iso=since_iso,
@@ -148,7 +354,7 @@ def main(argv=None) -> int:
         small_pr_threshold=float(((cfg.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300),
         tag=tag,
     )
-    print(f"Reports written to {outdir}")
+    print(f"Reports written to {outdir_path}")
     return 0
 
 
