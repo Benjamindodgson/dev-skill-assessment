@@ -1,0 +1,2 @@
+[console_scripts]
+devskill = devskill.cli:main

@@ -13,12 +13,13 @@ try:
 except Exception:  # pragma: no cover
     yaml = None
 
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+
 from . import collect, metrics, report, insights
 
-import requests
-
 REPO_RE = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+)(?:\.git)?$")
-GITHUB_GRAPHQL = "https://api.github.com/graphql"
+ 
 
 
 def parse_repo_input(s: str) -> Tuple[str, str]:
@@ -80,18 +81,13 @@ def _get_github_username(token: str) -> str:
         }
     }
     """
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    response = requests.post(
-        GITHUB_GRAPHQL,
+    data = collect._request_json(
+        "POST",
+        collect.GITHUB_GRAPHQL,
+        token,
+        timeout=10,
         json={"query": query},
-        headers=headers,
-        timeout=10
     )
-    response.raise_for_status()
-    data = response.json()
     return data["data"]["viewer"]["login"]
 
 
@@ -121,20 +117,13 @@ def _list_user_repos(token: str) -> List[Dict[str, Any]]:
             }}
         }}
         """
-        
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-        
-        response = requests.post(
-            GITHUB_GRAPHQL,
+        data = collect._request_json(
+            "POST",
+            collect.GITHUB_GRAPHQL,
+            token,
+            timeout=30,
             json={"query": query},
-            headers=headers,
-            timeout=30
         )
-        response.raise_for_status()
-        data = response.json()
         
         nodes = data["data"]["viewer"]["repositories"]["nodes"]
         repos.extend(nodes)
@@ -143,6 +132,8 @@ def _list_user_repos(token: str) -> List[Dict[str, Any]]:
         if not page_info["hasNextPage"]:
             break
         cursor = page_info["endCursor"]
+        # Gentle pacing to avoid secondary rate limits
+        time.sleep(0.2)
     
     return repos
 
@@ -304,25 +295,62 @@ def main(argv=None) -> int:
     cache_dir = Path.cwd() / ".cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Collecting GitHub data for {owner}/{repo} since {since_iso}...")
-    data = collect.collect_repository_data(
-        owner=owner,
-        repo=repo,
-        since_iso=since_iso,
-        until_iso=until_iso,
-        token=token,
-        bots=bots,
-        cache_dir=str(cache_dir),
-        use_cache=not args.no_cache,
-    )
+    console = Console()
+    console.print(f"[bold cyan]Collecting GitHub data for {owner}/{repo}[/bold cyan]")
+    console.print(f"[dim]Date range: {since_iso[:10]} to {until_iso[:10]}[/dim]\n")
+    
+    # Set up Rich progress display
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        # Create tasks for PRs and commits
+        pr_task = progress.add_task("[cyan]Fetching pull requests...", total=None)
+        commit_task = progress.add_task("[green]Fetching commits...", total=None)
+        
+        # Define progress callbacks
+        def on_prs_progress(status: str, count: int):
+            if status == "fetching":
+                progress.update(pr_task, description=f"[cyan]Fetching pull requests... ({count} fetched)")
+            elif status == "complete":
+                progress.update(pr_task, completed=100, total=100, description=f"[cyan]✓ Pull requests fetched ({count} total)")
+            elif status == "cached":
+                progress.update(pr_task, completed=100, total=100, description=f"[cyan]✓ Pull requests (cached: {count} total)")
+        
+        def on_commits_progress(status: str, count: int):
+            if status == "fetching":
+                progress.update(commit_task, description=f"[green]Fetching commits... ({count} fetched)")
+            elif status == "complete":
+                progress.update(commit_task, completed=100, total=100, description=f"[green]✓ Commits fetched ({count} total)")
+            elif status == "cached":
+                progress.update(commit_task, completed=100, total=100, description=f"[green]✓ Commits (cached: {count} total)")
+        
+        # Collect data with progress callbacks
+        data = collect.collect_repository_data(
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            token=token,
+            bots=bots,
+            cache_dir=str(cache_dir),
+            use_cache=not args.no_cache,
+            on_prs_progress=on_prs_progress,
+            on_commits_progress=on_commits_progress,
+        )
+    
+    console.print()
 
     tag = f"{owner}-{repo}-{now:%Y-%m-%d}"
     raw_path = outdir_path / f"dev-skill-raw-{tag}.json"
     with raw_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
-    print(f"Wrote raw data → {raw_path}")
+    console.print(f"[dim]Wrote raw data → {raw_path}[/dim]")
 
-    print("Computing metrics and scores...")
+    console.print("\n[bold yellow]Computing metrics and scores...[/bold yellow]")
     scores = metrics.compute_scores(
         data=data,
         owner=owner,
@@ -332,7 +360,7 @@ def main(argv=None) -> int:
         config=cfg,
     )
 
-    print("Generating reports...")
+    console.print("[bold magenta]Generating reports...[/bold magenta]")
     report.generate_reports(
         scores=scores,
         outdir=str(outdir_path),
@@ -354,7 +382,7 @@ def main(argv=None) -> int:
         small_pr_threshold=float(((cfg.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300),
         tag=tag,
     )
-    print(f"Reports written to {outdir_path}")
+    console.print(f"\n[bold green]✓ Reports written to {outdir_path}[/bold green]")
     return 0
 
 

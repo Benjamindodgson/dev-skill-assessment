@@ -2,8 +2,9 @@ import datetime as dt
 import json
 import os
 import time
+import random
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 import requests
 from requests import exceptions as req_exc
@@ -57,28 +58,50 @@ def _request_json(method: str, url: str, token: str, retries: int = 5, backoff: 
                     wait_s = max(0, int(reset) - now) + 1
                     time.sleep(min(wait_s, 60))
                     continue
+            # Retry on 5xx responses as transient server errors
+            if 500 <= resp.status_code < 600:
+                if attempt < retries - 1:
+                    # exponential backoff with jitter
+                    sleep_s = backoff * (2 ** attempt)
+                    jitter = random.uniform(0, sleep_s * 0.25)
+                    time.sleep(sleep_s + jitter)
+                    continue
             resp.raise_for_status()
             try:
                 return resp.json()
             except json.JSONDecodeError:
                 # Transient truncated responses
                 if attempt < retries - 1:
-                    time.sleep(backoff * (2 ** attempt))
+                    sleep_s = backoff * (2 ** attempt)
+                    jitter = random.uniform(0, sleep_s * 0.25)
+                    time.sleep(sleep_s + jitter)
                     continue
                 raise
         except (req_exc.ChunkedEncodingError, req_exc.ConnectionError, req_exc.ReadTimeout, req_exc.SSLError) as e:
             if attempt < retries - 1:
-                time.sleep(backoff * (2 ** attempt))
+                sleep_s = backoff * (2 ** attempt)
+                jitter = random.uniform(0, sleep_s * 0.25)
+                time.sleep(sleep_s + jitter)
                 continue
             raise e
     # Should not reach here
     raise RuntimeError("Request failed after retries")
 
 
-def _paginate_graphql(query: str, variables: Dict[str, Any], token: str, root_path: List[str]) -> List[Dict[str, Any]]:
+def _paginate_graphql(
+    query: str, 
+    variables: Dict[str, Any], 
+    token: str, 
+    root_path: List[str],
+    progress_callback: Optional[Callable[[str, int], None]] = None,
+) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     cursor = None
+    page_num = 0
     while True:
+        page_num += 1
+        if progress_callback:
+            progress_callback("fetching", len(items))
         vars_with_cursor = dict(variables)
         vars_with_cursor["cursor"] = cursor
         payload = _request_json(
@@ -111,10 +134,19 @@ def _paginate_graphql(query: str, variables: Dict[str, Any], token: str, root_pa
             break
         cursor = page_info["endCursor"]
         time.sleep(0.2)
+    if progress_callback:
+        progress_callback("complete", len(items))
     return items
 
 
-def _list_prs(owner: str, repo: str, token: str, since_iso: str, until_iso: str) -> List[Dict[str, Any]]:
+def _list_prs(
+    owner: str, 
+    repo: str, 
+    token: str, 
+    since_iso: str, 
+    until_iso: str,
+    progress_callback: Optional[Callable[[str, int], None]] = None,
+) -> List[Dict[str, Any]]:
     # GraphQL query for PRs with reviews and timeline counts
     query = """
     query($owner: String!, $repo: String!, $cursor: String) {
@@ -157,7 +189,7 @@ def _list_prs(owner: str, repo: str, token: str, since_iso: str, until_iso: str)
         "owner": owner,
         "repo": repo,
     }
-    items = _paginate_graphql(query, variables, token, ["data", "repository", "pullRequests"])
+    items = _paginate_graphql(query, variables, token, ["data", "repository", "pullRequests"], progress_callback)
     since = dt.datetime.fromisoformat(since_iso)
     until = dt.datetime.fromisoformat(until_iso)
     filtered: List[Dict[str, Any]] = []
@@ -168,11 +200,20 @@ def _list_prs(owner: str, repo: str, token: str, since_iso: str, until_iso: str)
     return filtered
 
 
-def _list_commits(owner: str, repo: str, token: str, since_iso: str, until_iso: str) -> List[Dict[str, Any]]:
+def _list_commits(
+    owner: str, 
+    repo: str, 
+    token: str, 
+    since_iso: str, 
+    until_iso: str,
+    progress_callback: Optional[Callable[[str, int], None]] = None,
+) -> List[Dict[str, Any]]:
     commits: List[Dict[str, Any]] = []
     page = 1
     per_page = 100
     while True:
+        if progress_callback:
+            progress_callback("fetching", len(commits))
         url = f"{GITHUB_REST}/repos/{owner}/{repo}/commits"
         params = {
             "since": since_iso,
@@ -187,6 +228,8 @@ def _list_commits(owner: str, repo: str, token: str, since_iso: str, until_iso: 
         commits.extend(batch)
         page += 1
         time.sleep(0.2)
+    if progress_callback:
+        progress_callback("complete", len(commits))
     return commits
 
 
@@ -213,6 +256,8 @@ def collect_repository_data(
     bots: Iterable[str],
     cache_dir: Optional[str] = None,
     use_cache: bool = True,
+    on_prs_progress: Optional[Callable[[str, int], None]] = None,
+    on_commits_progress: Optional[Callable[[str, int], None]] = None,
 ) -> Dict[str, Any]:
     cache = Path(cache_dir) if cache_dir else None
     if cache:
@@ -231,18 +276,22 @@ def collect_repository_data(
         cached_commits = None
 
     if cached_prs is None:
-        prs = _list_prs(owner, repo, token, since_iso, until_iso)
+        prs = _list_prs(owner, repo, token, since_iso, until_iso, on_prs_progress)
         if cache:
             _cache_set(cache, prs_key, {"items": prs})
     else:
         prs = cached_prs.get("items", [])
+        if on_prs_progress:
+            on_prs_progress("cached", len(prs))
 
     if cached_commits is None:
-        commits = _list_commits(owner, repo, token, since_iso, until_iso)
+        commits = _list_commits(owner, repo, token, since_iso, until_iso, on_commits_progress)
         if cache:
             _cache_set(cache, commits_key, {"items": commits})
     else:
         commits = cached_commits.get("items", [])
+        if on_commits_progress:
+            on_commits_progress("cached", len(commits))
 
     prs = _filter_out_bots(prs, set(bots))
     commits = _filter_out_bots(commits, set(bots))

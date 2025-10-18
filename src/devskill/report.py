@@ -1,4 +1,3 @@
-import csv
 import json
 import datetime as dt
 from pathlib import Path
@@ -48,44 +47,8 @@ def generate_reports(
     json_path = out / f"dev-skill-scores-{tag}.json"
     json_path.write_text(json.dumps(scores, indent=2), encoding="utf-8")
 
-    # CSV (flat per-developer)
-    csv_path = out / f"dev-skill-assessment-{tag}.csv"
-    devs: List[Dict[str, Any]] = scores.get("developers", [])
-    fieldnames = [
-        "developer",
-        "score",
-        "delivery",
-        "collaboration",
-        "hygiene",
-        "stability",
-        "delivery.merged_prs",
-        "delivery.lead_time_median_h",
-        "delivery.merge_rate",
-        "collab.reviews_written",
-        "collab.review_comments",
-        "collab.unique_people_reviewed",
-        "collab.tffr_median_h",
-        "hygiene.pr_size_median",
-        "hygiene.small_pr_pct",
-        "hygiene.draft_rate",
-        "stability.change_requests",
-        "stability.reopened_prs",
-        "stability.fix48",
-        "activity.commits",
-    ]
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for d in devs:
-            w.writerow({
-                **{k: d.get(k) for k in fieldnames if "." in k or k in {"developer", "score"}},
-                "delivery": d.get("subscores", {}).get("delivery"),
-                "collaboration": d.get("subscores", {}).get("collaboration"),
-                "hygiene": d.get("subscores", {}).get("hygiene"),
-                "stability": d.get("subscores", {}).get("stability"),
-            })
-
     # Markdown summary
+    devs: List[Dict[str, Any]] = scores.get("developers", [])
     md_path = out / f"dev-skill-assessment-{tag}.md"
     team = scores.get("team", {})
     lines = []
