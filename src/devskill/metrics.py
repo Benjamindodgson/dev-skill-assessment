@@ -149,9 +149,28 @@ def compute_scores(
     weights = config.get("weights", {"delivery": 0.30, "collaboration": 0.25, "hygiene": 0.15, "stability": 0.30})
     small_pr_threshold = float(((config.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300)
 
-    # Prepare exclusions (case-insensitive), support either 'exclude' or legacy 'exclude_logins'
-    exclude_cfg = (config.get("exclude") or []) + (config.get("exclude_logins") or [])
-    excluded_logins_lower = {str(x).lower() for x in exclude_cfg}
+    # Prepare exclusions (case-insensitive), support either 'exclude' or legacy 'exclude_logins'.
+    # Canonicalize using aliases and also consider email local-parts to catch identities that
+    # appear as emails in commit data.
+    raw_excludes = (config.get("exclude") or []) + (config.get("exclude_logins") or [])
+    excluded_logins_lower = set()
+    for raw in raw_excludes:
+        if raw is None:
+            continue
+        # Consider the value as provided
+        candidates = [str(raw)]
+        # Also consider its canonicalized form via aliases
+        candidates.append(canonical(str(raw)))
+        # If an email, also consider the local-part before '@'
+        for cand in list(candidates):
+            if "@" in cand:
+                local = cand.split("@", 1)[0]
+                candidates.append(local)
+                # also canonicalize the local-part via aliases
+                candidates.append(canonical(local))
+        for cand in candidates:
+            if cand:
+                excluded_logins_lower.add(str(cand).lower())
 
     dev_rows = []
     for dev, agg in per_dev.items():
