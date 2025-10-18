@@ -217,11 +217,11 @@ def _prompt_days() -> int:
             sys.exit(1)
 
 
-def _prompt_output_dir() -> str:
+def _prompt_output_dir(default: str) -> str:
     """Prompt for output directory."""
     try:
-        response = input("\nOutput directory [reports]: ").strip()
-        return response if response else "reports"
+        response = input(f"\nOutput directory [{default}]: ").strip()
+        return response if response else default
     except (KeyboardInterrupt, EOFError):
         print("\nAborted.")
         sys.exit(1)
@@ -241,7 +241,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser("devskill")
     p.add_argument("--repo-url", required=False, help="owner/repo or GitHub URL")
     p.add_argument("--days", type=int, default=None)
-    p.add_argument("--outdir", default=None)
+    p.add_argument("--outdir", default=None, help="Output directory (default: ~/Desktop/Reports (repo-name), (MM-DD-YYYY))")
     p.add_argument("--config", default=None)
     p.add_argument("--no-cache", action="store_true")
     args = p.parse_args(argv)
@@ -264,7 +264,11 @@ def main(argv=None) -> int:
         
         # Prompt for other parameters
         days = _prompt_days()
-        outdir = _prompt_output_dir()
+        
+        # Calculate default output directory with repo name and current date
+        now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+        default_outdir = str(Path.home() / "Desktop" / f"Reports ({repo}), ({now:%m-%d-%Y})")
+        outdir = _prompt_output_dir(default_outdir)
         config_path = _prompt_config_file()
         
         print("\n" + "=" * 80)
@@ -280,10 +284,16 @@ def main(argv=None) -> int:
             return 2
         
         days = args.days if args.days is not None else 90
-        outdir = args.outdir if args.outdir is not None else "reports"
+        
+        # Calculate default output directory with repo name and current date
+        now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+        default_outdir = str(Path.home() / "Desktop" / f"Reports ({repo}), ({now:%m-%d-%Y})")
+        outdir = args.outdir if args.outdir is not None else default_outdir
         config_path = args.config
 
-    now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+    # Calculate date range (reuse 'now' from interactive mode if already set)
+    if 'now' not in locals():
+        now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
     since = now - dt.timedelta(days=days)
     since_iso, until_iso = since.isoformat(), now.isoformat()
 

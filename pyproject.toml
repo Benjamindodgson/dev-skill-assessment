@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dev-skill-assessment"
-version = "0.1.0"
+version = "0.1.1"
 description = "Run a 90-day GitHub developer assessment against any repository"
 readme = "README.md"
 requires-python = ">=3.9"
