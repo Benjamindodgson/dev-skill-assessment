@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dev-skill-assessment"
+version = "0.1.0"
+description = "Run a 90-day GitHub developer assessment against any repository"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "" }]
+dependencies = [
+  "requests>=2.31.0",
+  "PyYAML>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Benjamindodgson/dev-skill-assessment"
+Repository = "https://github.com/Benjamindodgson/dev-skill-assessment"
+
+[project.scripts]
+devskill = "devskill.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["devskill"]
+
+

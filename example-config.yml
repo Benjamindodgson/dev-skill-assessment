@@ -1,0 +1,44 @@
+# Repo override: set to 'owner/repo' to bypass auto-detection from git remote
+# repo: your-org/PestService_iOS
+
+# Timeframe in days
+timeframe_days: 90
+
+# Bot or system accounts to exclude from scoring
+bots:
+  - dependabot
+  - dependabot[bot]
+  - github-actions
+  - github-actions[bot]
+  - renovate
+  - renovate[bot]
+
+# Optional alias mapping to unify identities across email/login variants
+# Example:
+# aliases:
+#   ben.d: benjidodgson
+#   ben@company.com: benjidodgson
+aliases: {}
+
+# Metric weights (must sum to 1.0)
+weights:
+  delivery: 0.30
+  collaboration: 0.25
+  hygiene: 0.15
+  stability: 0.30
+
+# Hygiene thresholds
+hygiene:
+  small_pr_lines_threshold: 300
+
+# Responsiveness: exclude weekends from review timing metrics
+responsiveness:
+  exclude_weekends: true
+
+#Exclude specific logins (case-insensitive) from scoring and reports
+exclude:
+  - cursoragent
+  - unknown
+  - benjamindodgson
+  - cursor
+
