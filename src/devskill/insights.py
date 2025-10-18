@@ -33,7 +33,7 @@ def _pick_improvement_area(subscores: Dict[str, float]) -> str:
     return min(subscores.items(), key=lambda kv: kv[1])[0]
 
 
-def _strength_example(area: str, dev_login: str, data: Dict[str, Any], small_pr_threshold: float) -> str:
+def _strength_example(area: str, dev_login: str, data: Dict[str, Any], small_pr_threshold: float, owner: str, repo: str) -> str:
     prs = data.get("pull_requests", [])
     # Delivery: fastest merged PR
     if area == "delivery":
@@ -52,7 +52,7 @@ def _strength_example(area: str, dev_login: str, data: Dict[str, Any], small_pr_
                 best = pr
         if best is not None and best_hours is not None:
             size = (best.get("additions", 0) or 0) + (best.get("deletions", 0) or 0)
-            return f"PR #{best.get('number')} merged in {_fmt_duration_hm(best_hours)} (±{int(size)} lines)."
+            return f"{_github_pr_link(owner, repo, best.get('number'))} merged in {_fmt_duration_hm(best_hours)} (±{int(size)} lines)."
         return "Merged PR with quick turnaround."
 
     # Collaboration: earliest review on others' PRs
@@ -75,7 +75,7 @@ def _strength_example(area: str, dev_login: str, data: Dict[str, Any], small_pr_
                     best = pr
         if best is not None and best_delta is not None:
             author = (best.get("author") or {}).get("login", "")
-            return f"Reviewed PR #{best.get('number')} from @{author} within {_fmt_duration_hm(best_delta)} of creation."
+            return f"Reviewed {_github_pr_link(owner, repo, best.get('number'))} from {_github_user_link(author)} within {_fmt_duration_hm(best_delta)} of creation."
         return "Provided timely peer review."
 
     # Hygiene: small PR example
@@ -90,7 +90,7 @@ def _strength_example(area: str, dev_login: str, data: Dict[str, Any], small_pr_
                 best_size = size
                 best = pr
         if best is not None and best_size is not None:
-            return f"PR #{best.get('number')} was a focused change (±{int(best_size)} lines)."
+            return f"{_github_pr_link(owner, repo, best.get('number'))} was a focused change (±{int(best_size)} lines)."
         return "Submitted focused, reviewable PRs."
 
     # Stability: PR merged without change requests (proxy for initial quality)
@@ -102,7 +102,7 @@ def _strength_example(area: str, dev_login: str, data: Dict[str, Any], small_pr_
                 continue
             reviews = (pr.get("reviews") or {}).get("nodes", [])
             if not any(rv.get("state") == "CHANGES_REQUESTED" for rv in reviews):
-                return f"PR #{pr.get('number')} merged with 0 change requests."
+                return f"{_github_pr_link(owner, repo, pr.get('number'))} merged with 0 change requests."
         return "PRs merged with minimal rework."
 
     return "Consistent performance."
@@ -131,6 +131,21 @@ def _fmt_pretty_date(iso: str) -> str:
     return f"{d.strftime('%B')} {day}{suffix}, {d.year}"
 
 
+def _github_repo_link(owner: str, repo: str) -> str:
+    """Returns markdown link for GitHub repository."""
+    return f"[{owner}/{repo}](https://github.com/{owner}/{repo})"
+
+
+def _github_pr_link(owner: str, repo: str, number: int) -> str:
+    """Returns markdown link for GitHub PR."""
+    return f"[PR #{number}](https://github.com/{owner}/{repo}/pull/{number})"
+
+
+def _github_user_link(username: str) -> str:
+    """Returns markdown link for GitHub user."""
+    return f"[@{username}](https://github.com/{username})"
+
+
 def _improvement_tip(area: str, dev_row: Dict[str, Any], team_medians: Dict[str, float], small_pr_threshold: float) -> str:
     if area == "delivery":
         lead_h = float(dev_row.get("delivery.lead_time_median_h", 0.0))
@@ -151,7 +166,7 @@ def _improvement_tip(area: str, dev_row: Dict[str, Any], team_medians: Dict[str,
     return "Focus on consistent incremental improvements."
 
 
-def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr_threshold: float) -> List[str]:
+def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr_threshold: float, owner: str, repo: str) -> List[str]:
     prs = data.get("pull_requests", [])
     examples: List[str] = []
 
@@ -168,7 +183,7 @@ def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr
             merged.append((hours, pr))
         for hours, pr in sorted(merged, key=lambda t: t[0])[:3]:
             size = (pr.get("additions", 0) or 0) + (pr.get("deletions", 0) or 0)
-            examples.append(f"PR #{pr.get('number')} merged in {_fmt_duration_hm(hours)} (±{int(size)} lines).")
+            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} merged in {_fmt_duration_hm(hours)} (±{int(size)} lines).")
         return examples
 
     if area == "collaboration":
@@ -186,7 +201,7 @@ def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr
                     reviews.append((delta, pr))
         for delta, pr in sorted(reviews, key=lambda t: t[0])[:3]:
             author = (pr.get("author") or {}).get("login", "")
-            examples.append(f"Reviewed PR #{pr.get('number')} from @{author} within {_fmt_duration_hm(delta)}.")
+            examples.append(f"Reviewed {_github_pr_link(owner, repo, pr.get('number'))} from {_github_user_link(author)} within {_fmt_duration_hm(delta)}.")
         if not examples:
             examples.append("No recorded reviews in window; collaboration visible via other channels may not be captured.")
         return examples
@@ -199,7 +214,7 @@ def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr
             size = float((pr.get("additions", 0) or 0) + (pr.get("deletions", 0) or 0))
             sizes.append((size, pr))
         for size, pr in sorted(sizes, key=lambda t: t[0])[:3]:
-            examples.append(f"PR #{pr.get('number')} was focused (±{int(size)} lines).")
+            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} was focused (±{int(size)} lines).")
         return examples
 
     if area == "stability":
@@ -213,7 +228,7 @@ def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr
             if not any(rv.get("state") == "CHANGES_REQUESTED" for rv in reviews):
                 zero_cr.append(pr)
         for pr in zero_cr[:3]:
-            examples.append(f"PR #{pr.get('number')} merged with 0 change requests.")
+            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} merged with 0 change requests.")
         if not examples:
             examples.append("Merged PRs generally required minimal rework.")
         return examples
@@ -221,7 +236,7 @@ def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr
     return ["Consistent performance across areas."]
 
 
-def _improvement_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr_threshold: float) -> List[str]:
+def _improvement_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr_threshold: float, owner: str, repo: str) -> List[str]:
     prs = data.get("pull_requests", [])
     examples: List[str] = []
 
@@ -238,7 +253,7 @@ def _improvement_examples(area: str, dev_login: str, data: Dict[str, Any], small
             merged.append((hours, pr))
         for hours, pr in sorted(merged, key=lambda t: t[0], reverse=True)[:3]:
             size = (pr.get("additions", 0) or 0) + (pr.get("deletions", 0) or 0)
-            examples.append(f"PR #{pr.get('number')} took {_fmt_duration_hm(hours)} to merge (±{int(size)} lines). Consider breaking into smaller parts.")
+            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} took {_fmt_duration_hm(hours)} to merge (±{int(size)} lines). Consider breaking into smaller parts.")
         if not examples:
             examples.append("No merged PRs to analyze; consider smaller, more frequent PRs to improve delivery cadence.")
         return examples
@@ -258,7 +273,7 @@ def _improvement_examples(area: str, dev_login: str, data: Dict[str, Any], small
                     reviews.append((delta, pr))
         for delta, pr in sorted(reviews, key=lambda t: t[0], reverse=True)[:3]:
             author = (pr.get("author") or {}).get("login", "")
-            examples.append(f"Reviewed PR #{pr.get('number')} from @{author} after {_fmt_duration_hm(delta)}; aim for <24h.")
+            examples.append(f"Reviewed {_github_pr_link(owner, repo, pr.get('number'))} from {_github_user_link(author)} after {_fmt_duration_hm(delta)}; aim for <24h.")
         if not examples:
             examples.append("No recorded peer reviews; start by reviewing 1–2 teammate PRs daily.")
             examples.append("Enable notifications for review requests to improve responsiveness.")
@@ -273,7 +288,7 @@ def _improvement_examples(area: str, dev_login: str, data: Dict[str, Any], small
             size = float((pr.get("additions", 0) or 0) + (pr.get("deletions", 0) or 0))
             sizes.append((size, pr))
         for size, pr in sorted(sizes, key=lambda t: t[0], reverse=True)[:3]:
-            examples.append(f"PR #{pr.get('number')} was large (±{int(size)} lines). Split along feature boundaries.")
+            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} was large (±{int(size)} lines). Split along feature boundaries.")
         if not examples:
             examples.append("No authored PRs; create smaller, focused PRs to improve reviewability.")
         return examples
@@ -287,7 +302,7 @@ def _improvement_examples(area: str, dev_login: str, data: Dict[str, Any], small
             if any(rv.get("state") == "CHANGES_REQUESTED" for rv in reviews):
                 with_cr.append(pr)
         for pr in with_cr[:3]:
-            examples.append(f"PR #{pr.get('number')} received change requests; add pre-review checks and tests.")
+            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} received change requests; add pre-review checks and tests.")
         if not examples:
             examples.append("No change-requested PRs found; ensure tests and checklists to maintain quality.")
         return examples
@@ -334,7 +349,7 @@ def generate_insights(
 
     lines: List[str] = []
     lines.append("# 90-Day Assessment: Strengths & Improvements")
-    lines.append(f"Repository: {owner}/{repo}  ")
+    lines.append(f"Repository: {_github_repo_link(owner, repo)}  ")
     lines.append(f"Window: { _fmt_pretty_date(since_iso) } → { _fmt_pretty_date(until_iso) }")
     lines.append("")
 
@@ -347,11 +362,11 @@ def generate_insights(
         lines.append("")
         lines.append(f"- Strength: {strength.capitalize()}  ")
         lines.append("  Examples:")
-        for ex in _strength_examples(strength, name, data, small_pr_threshold)[:3]:
+        for ex in _strength_examples(strength, name, data, small_pr_threshold, owner, repo)[:3]:
             lines.append(f"  - {ex}")
         lines.append(f"- Improvement: {improvement.capitalize()}  ")
         lines.append("  Examples:")
-        for ex in _improvement_examples(improvement, name, data, small_pr_threshold)[:3]:
+        for ex in _improvement_examples(improvement, name, data, small_pr_threshold, owner, repo)[:3]:
             lines.append(f"  - {ex}")
         lines.append(f"  Tip: {_improvement_tip(improvement, d, team_meds, small_pr_threshold)}")
         lines.append("")

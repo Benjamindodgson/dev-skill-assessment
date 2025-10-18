@@ -21,6 +21,11 @@ def _fmt_pretty_date(iso: str) -> str:
     return f"{month} {day}{suffix}, {d.year}"
 
 
+def _github_repo_link(owner: str, repo: str) -> str:
+    """Returns markdown link for GitHub repository."""
+    return f"[{owner}/{repo}](https://github.com/{owner}/{repo})"
+
+
 def generate_reports(
     scores: Dict[str, Any],
     outdir: str,
@@ -85,7 +90,7 @@ def generate_reports(
     team = scores.get("team", {})
     lines = []
     lines.append(f"# 90-Day GitHub Dev Assessment\n")
-    lines.append(f"Repository: {owner}/{repo}  ")
+    lines.append(f"Repository: {_github_repo_link(owner, repo)}  ")
     lines.append(f"Window: { _fmt_pretty_date(since_iso) } → { _fmt_pretty_date(until_iso) }  ")
     lines.append(f"Team Score: {team.get('score', 0.0)}  ")
     lines.append("")
