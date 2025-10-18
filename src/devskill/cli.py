@@ -3,6 +3,7 @@ import datetime as dt
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -41,6 +42,33 @@ def _load_config(path: Any) -> Dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _get_github_token() -> str:
+    """Get GitHub token from gh CLI or GITHUB_TOKEN env var."""
+    # Try gh CLI first
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    
+    # Fall back to environment variable
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        return token
+    
+    raise RuntimeError(
+        "No GitHub authentication found. Either:\n"
+        "  1. Install and authenticate with GitHub CLI: gh auth login\n"
+        "  2. Set GITHUB_TOKEN environment variable"
+    )
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser("devskill")
     p.add_argument("--repo-url", required=True, help="owner/repo or GitHub URL")
@@ -51,9 +79,10 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     owner, repo = parse_repo_input(args.repo_url.strip())
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if not token:
-        print("GITHUB_TOKEN is required", file=sys.stderr)
+    try:
+        token = _get_github_token()
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
         return 2
 
     now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)

@@ -10,15 +10,23 @@ pip install git+https://github.com/Benjamindodgson/dev-skill-assessment.git
 
 ## Usage
 
-```bash
-export GITHUB_TOKEN=ghp_... # token with repo read access
+First, authenticate with GitHub CLI:
 
+```bash
+gh auth login
+```
+
+Then run the assessment:
+
+```bash
 devskill \
   --repo-url https://github.com/owner/repo \
   --days 90 \
   --outdir reports \
   --config config.yml
 ```
+
+**Authentication:** The tool uses GitHub CLI authentication by default. For CI/automation, you can set `GITHUB_TOKEN` environment variable instead.
 
 - `--repo-url`: accepts `owner/repo`, HTTPS, or SSH GitHub URLs
 - `--days`: time window (default 90)
