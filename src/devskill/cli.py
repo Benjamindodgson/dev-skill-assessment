@@ -410,6 +410,11 @@ def main(argv=None) -> int:
             config=cfg,
         )
 
+        # Create dated subfolder for reports
+        folder_name = report._fmt_folder_name(repo, until_iso)
+        report_subdir = outdir_path / folder_name
+        report_subdir.mkdir(parents=True, exist_ok=True)
+
         console.print("[bold magenta]Generating reports...[/bold magenta]")
         report.generate_reports(
             scores=scores,
@@ -441,7 +446,7 @@ def main(argv=None) -> int:
             until_iso=until_iso,
             named=not getattr(args, "anonymous", False),
         )
-        console.print(f"\n[bold green]✓ Reports regenerated in {outdir_path}[/bold green]")
+        console.print(f"\n[bold green]✓ Reports regenerated in {report_subdir}[/bold green]")
         return 0
 
     # Interactive mode: if no repo-url is provided
@@ -554,7 +559,13 @@ def main(argv=None) -> int:
     console.print()
 
     tag = f"{owner}-{repo}-{now:%Y-%m-%d}"
-    raw_path = outdir_path / f"dev-skill-raw-{tag}.json"
+    
+    # Create dated subfolder for reports
+    folder_name = report._fmt_folder_name(repo, until_iso)
+    report_subdir = outdir_path / folder_name
+    report_subdir.mkdir(parents=True, exist_ok=True)
+    
+    raw_path = report_subdir / f"dev-skill-raw-{tag}.json"
     with raw_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
     console.print(f"[dim]Wrote raw data → {raw_path}[/dim]")
@@ -600,7 +611,7 @@ def main(argv=None) -> int:
         until_iso=until_iso,
         named=True,
     )
-    console.print(f"\n[bold green]✓ Reports written to {outdir_path}[/bold green]")
+    console.print(f"\n[bold green]✓ Reports written to {report_subdir}[/bold green]")
     return 0
 
 

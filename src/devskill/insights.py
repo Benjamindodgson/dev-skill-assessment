@@ -131,6 +131,15 @@ def _fmt_pretty_date(iso: str) -> str:
     return f"{d.strftime('%B')} {day}{suffix}, {d.year}"
 
 
+def _fmt_folder_name(repo: str, date_iso: str) -> str:
+    """Format folder name as: RepoName, Month Day, Year"""
+    d = dt.datetime.fromisoformat(date_iso.replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+    month = d.strftime("%B")  # Full month name
+    day = d.day
+    year = d.year
+    return f"{repo}, {month} {day}, {year}"
+
+
 def _github_repo_link(owner: str, repo: str) -> str:
     """Returns markdown link for GitHub repository."""
     return f"[{owner}/{repo}](https://github.com/{owner}/{repo})"
@@ -342,10 +351,15 @@ def generate_insights(
         now = dt.datetime.utcnow()
         tag = f"{owner}-{repo}-{now:%Y-%m-%d}"
 
+    # Create dated subfolder
+    folder_name = _fmt_folder_name(repo, until_iso)
+    report_dir = out / folder_name
+    _ensure_dir(report_dir)
+
     devs: List[Dict[str, Any]] = scores.get("developers", [])
     team_meds = _team_medians(devs)
 
-    md_path = out / f"dev-skill-assessment-insights-{tag}.md"
+    md_path = report_dir / f"dev-skill-assessment-insights-{tag}.md"
 
     lines: List[str] = []
     lines.append("# 90-Day Assessment: Strengths & Improvements")

@@ -20,6 +20,15 @@ def _fmt_pretty_date(iso: str) -> str:
     return f"{month} {day}{suffix}, {d.year}"
 
 
+def _fmt_folder_name(repo: str, date_iso: str) -> str:
+    """Format folder name as: RepoName, Month Day, Year"""
+    d = dt.datetime.fromisoformat(date_iso.replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+    month = d.strftime("%B")  # Full month name
+    day = d.day
+    year = d.year
+    return f"{repo}, {month} {day}, {year}"
+
+
 def _github_repo_link(owner: str, repo: str) -> str:
     """Returns markdown link for GitHub repository."""
     return f"[{owner}/{repo}](https://github.com/{owner}/{repo})"
@@ -43,13 +52,18 @@ def generate_reports(
         now = dt.datetime.utcnow()
         tag = f"{owner}-{repo}-{now:%Y-%m-%d}"
 
+    # Create dated subfolder
+    folder_name = _fmt_folder_name(repo, until_iso)
+    report_dir = out / folder_name
+    _ensure_dir(report_dir)
+
     # JSON (already aggregated)
-    json_path = out / f"dev-skill-scores-{tag}.json"
+    json_path = report_dir / f"dev-skill-scores-{tag}.json"
     json_path.write_text(json.dumps(scores, indent=2), encoding="utf-8")
 
     # Markdown summary
     devs: List[Dict[str, Any]] = scores.get("developers", [])
-    md_path = out / f"dev-skill-assessment-{tag}.md"
+    md_path = report_dir / f"dev-skill-assessment-{tag}.md"
     team = scores.get("team", {})
     lines = []
     lines.append(f"# 90-Day GitHub Dev Assessment\n")
