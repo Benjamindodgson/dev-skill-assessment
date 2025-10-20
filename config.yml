@@ -44,7 +44,7 @@ exclude:
 
 # QA assessment configuration (Azure DevOps)
 qa:
-  users: []
+  users: [samina.wasey@ecolab.com,simran.rijal@ecolab.com,nishitha.voleti@ecolab.com,raja.kattoju@ecolab.com,christian.gomez@ecolab.com]
   aliases: {}
   exclude: []
   weights:

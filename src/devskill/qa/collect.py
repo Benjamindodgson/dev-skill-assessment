@@ -4,6 +4,7 @@ import time
 import random
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
+from urllib.parse import quote
 
 import requests
 
@@ -75,7 +76,7 @@ def _request_json(method: str, url: str, token: str, retries: int = 5, backoff: 
 def _list_test_runs(org: str, project: str, token: str, since_iso: str, until_iso: str, progress_callback: Optional[Callable[[str, int], None]] = None) -> List[Dict[str, Any]]:
     # Date filters use ISO; limit to top 1000 for performance
     url = (
-        f"https://dev.azure.com/{org}/{project}/_apis/test/runs"
+        f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/test/runs"
         f"?minLastUpdatedDate={since_iso}&maxLastUpdatedDate={until_iso}&$top=1000&api-version=7.1-preview.1"
     )
     if progress_callback:
@@ -100,7 +101,7 @@ def _list_test_runs(org: str, project: str, token: str, since_iso: str, until_is
 
 def _list_test_results_for_run(org: str, project: str, run_id: int, token: str) -> List[Dict[str, Any]]:
     # Note: results endpoint is preview; cap at 1000
-    url = f"https://dev.azure.com/{org}/{project}/_apis/test/Runs/{run_id}/results?$top=1000&api-version=7.1-preview.6"
+    url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/test/Runs/{run_id}/results?$top=1000&api-version=7.1-preview.6"
     payload = _request_json("GET", url, token)
     results = payload.get("value", [])
     out: List[Dict[str, Any]] = []
@@ -126,7 +127,7 @@ def _list_test_results_for_run(org: str, project: str, run_id: int, token: str) 
 
 
 def _wiql_query_bugs(org: str, project: str, token: str, since_iso: str, until_iso: str) -> List[int]:
-    url = f"https://dev.azure.com/{org}/{project}/_apis/wit/wiql?api-version=7.1-preview.2"
+    url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/wit/wiql?api-version=7.1-preview.2"
     query = (
         "SELECT [System.Id] FROM WorkItems "
         "WHERE [System.WorkItemType] = 'Bug' "
@@ -147,7 +148,7 @@ def _work_items_batch(org: str, project: str, token: str, ids: List[int]) -> Lis
             continue
         joined = ",".join(str(x) for x in chunk)
         url = (
-            f"https://dev.azure.com/{org}/{project}/_apis/wit/workitems"
+            f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/wit/workitems"
             f"?ids={joined}&$expand=Relations&api-version=7.1-preview.3"
         )
         payload = _request_json("GET", url, token)

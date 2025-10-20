@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import requests
 from rich.console import Console
@@ -45,7 +46,7 @@ def _ado_headers(token: str) -> Dict[str, str]:
 
 
 def _list_projects(org: str, token: str) -> List[Dict[str, Any]]:
-    url = f"https://dev.azure.com/{org}/_apis/projects?stateFilter=all&$top=1000&api-version=7.1-preview.4"
+    url = f"https://dev.azure.com/{quote(org, safe='')}/_apis/projects?stateFilter=all&$top=1000&api-version=7.1-preview.4"
     resp = requests.get(url, headers=_ado_headers(token), timeout=30)
     resp.raise_for_status()
     return resp.json().get("value", [])
