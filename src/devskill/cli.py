@@ -36,9 +36,16 @@ def parse_repo_input(s: str) -> Tuple[str, str]:
     raise ValueError("Expected 'owner/repo' or a GitHub URL")
 
 
-def _load_config(path: Any) -> Dict[str, Any]:
+def _load_config(path: Any, verbose: bool = True) -> Dict[str, Any]:
+    # Auto-discover config.yml if not specified
+    auto_discovered = False
     if not path:
-        return {}
+        default_config = Path.cwd() / "config.yml"
+        if default_config.exists():
+            path = default_config
+            auto_discovered = True
+        else:
+            return {}
     p = Path(path)
     if not p.exists():
         return {}
@@ -46,7 +53,10 @@ def _load_config(path: Any) -> Dict[str, Any]:
         print("PyYAML not installed; ignoring --config", file=sys.stderr)
         return {}
     with p.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        config = yaml.safe_load(f) or {}
+        if verbose and auto_discovered:
+            print(f"[config] Auto-discovered and loaded: {p}")
+        return config
 
 
 def _get_github_token() -> str:

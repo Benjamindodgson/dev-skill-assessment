@@ -150,9 +150,10 @@ def compute_scores(
     small_pr_threshold = float(((config.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300)
 
     # Prepare exclusions (case-insensitive), support either 'exclude' or legacy 'exclude_logins'.
+    # Also include bots from the bots list to ensure they're filtered from reports even when using cached data.
     # Canonicalize using aliases and also consider email local-parts to catch identities that
     # appear as emails in commit data.
-    raw_excludes = (config.get("exclude") or []) + (config.get("exclude_logins") or [])
+    raw_excludes = (config.get("exclude") or []) + (config.get("exclude_logins") or []) + (config.get("bots") or [])
     excluded_logins_lower = set()
     for raw in raw_excludes:
         if raw is None:
