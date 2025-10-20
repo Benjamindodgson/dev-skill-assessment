@@ -48,6 +48,40 @@ devskill \
 
 Outputs include repository and date in filenames, e.g. `dev-skill-assessment-OWNER-REPO-YYYY-MM-DD.md` and `dev-skill-assessment-insights-OWNER-REPO-YYYY-MM-DD.md`.
 
+### Rerun from last raw data
+
+You can regenerate reports from the most recent saved raw JSON without calling GitHub again:
+
+```bash
+# Regenerate from the latest dev-skill-raw-*.json under ./reports (if present)
+devskill rerun
+
+# Search within a specific directory for the latest raw JSON
+devskill rerun --outdir reports
+
+# Use a specific raw file
+devskill rerun --raw reports/dev-skill-raw-OWNER-REPO-YYYY-MM-DD.json
+
+# Apply a config (aliases, bots, weights) and anonymize names
+devskill rerun --config config.yml --anonymous
+
+# Override the output tag used in filenames
+devskill rerun --tag custom-tag
+```
+
+### Fork this repo (recommended)
+
+To keep your results organized in this project and save outputs under `./reports`:
+
+```bash
+gh repo fork Benjamindodgson/dev-skill-assessment --clone
+cd dev-skill-assessment
+pip install -e .
+devskill
+```
+
+The default output directory is `./reports`. You can override with `--outdir`.
+
 ## Config YAML (optional)
 
 See `config.yml` for a complete configuration example. Basic structure:

@@ -7,7 +7,7 @@ import time
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 try:
     import yaml  # type: ignore
@@ -237,14 +237,141 @@ def _prompt_config_file() -> Any:
         sys.exit(1)
 
 
+def _discover_latest_raw(search_root: Optional[str]) -> Optional[Path]:
+    """Find the most recent dev-skill-raw-*.json under the given root or defaults.
+
+    Search order when search_root is None:
+      1) ./reports (if exists)
+    Select by newest modification time.
+    """
+    candidates: List[Path] = []
+    roots: List[Path] = []
+    if search_root:
+        roots.append(Path(search_root))
+    else:
+        default_reports = Path.cwd() / "reports"
+        if default_reports.exists():
+            roots.append(default_reports)
+
+    for root in roots:
+        try:
+            for p in root.rglob("dev-skill-raw-*.json"):
+                if p.is_file():
+                    candidates.append(p)
+        except Exception:
+            # Ignore permission or traversal errors and continue
+            continue
+
+    if not candidates:
+        return None
+    # Pick latest by mtime
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
+def _derive_tag_from_raw_filename(p: Path) -> Optional[str]:
+    name = p.name
+    prefix = "dev-skill-raw-"
+    suffix = ".json"
+    if name.startswith(prefix) and name.endswith(suffix):
+        return name[len(prefix) : -len(suffix)]
+    return None
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser("devskill")
+    subparsers = p.add_subparsers(dest="command")
+    # Rerun subcommand (re-generate from existing raw JSON)
+    rerun_p = subparsers.add_parser("rerun", help="Regenerate reports from last saved raw data")
+    rerun_p.add_argument("--raw", default=None, help="Path to dev-skill-raw-*.json (optional)")
+    rerun_p.add_argument("--tag", default=None, help="Tag to use for regenerated reports (optional)")
+    rerun_p.add_argument("--anonymous", action="store_true", help="Generate anonymized developer names")
     p.add_argument("--repo-url", required=False, help="owner/repo or GitHub URL")
     p.add_argument("--days", type=int, default=None)
-    p.add_argument("--outdir", default=None, help="Output directory (default: ~/Desktop/Reports (repo-name), (MM-DD-YYYY))")
+    p.add_argument("--outdir", default=None, help="Output directory (default: ./reports)")
     p.add_argument("--config", default=None)
     p.add_argument("--no-cache", action="store_true")
     args = p.parse_args(argv)
+
+    # Handle rerun subcommand: reuse last raw JSON, recompute metrics, regenerate reports/insights
+    if getattr(args, "command", None) == "rerun":
+        console = Console()
+        console.print("[bold cyan]Rerunning from last raw data[/bold cyan]")
+
+        raw_path: Optional[Path]
+        if getattr(args, "raw", None):
+            raw_path = Path(args.raw)
+            if not raw_path.exists():
+                console.print(f"[red]Raw file not found:[/red] {raw_path}")
+                return 2
+        else:
+            # Search using provided outdir as root if given; else defaults
+            raw_path = _discover_latest_raw(args.outdir)
+            if not raw_path:
+                console.print("[red]No dev-skill-raw-*.json found.[/red]")
+                console.print("Hint: pass --raw PATH or --outdir DIR to search in.")
+                return 2
+
+        try:
+            with raw_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            console.print(f"[red]Failed to read raw JSON:[/red] {e}")
+            return 2
+
+        owner = data.get("owner")
+        repo = data.get("repo")
+        since_iso = data.get("since")
+        until_iso = data.get("until")
+        if not all([owner, repo, since_iso, until_iso]):
+            console.print("[red]Raw JSON missing required fields (owner, repo, since, until).[/red]")
+            return 2
+
+        cfg = _load_config(args.config)
+
+        # Determine output directory and tag
+        outdir_path = Path(args.outdir) if args.outdir else raw_path.parent
+        outdir_path.mkdir(parents=True, exist_ok=True)
+
+        tag = args.tag or _derive_tag_from_raw_filename(raw_path) or f"{owner}-{repo}-{dt.datetime.utcnow():%Y-%m-%d}"
+
+        console.print(f"[dim]Using raw:[/dim] {raw_path}")
+        console.print(f"[dim]Output dir:[/dim] {outdir_path}")
+        console.print("\n[bold yellow]Computing metrics and scores...[/bold yellow]")
+
+        scores = metrics.compute_scores(
+            data=data,
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            config=cfg,
+        )
+
+        console.print("[bold magenta]Generating reports...[/bold magenta]")
+        report.generate_reports(
+            scores=scores,
+            outdir=str(outdir_path),
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            named=not getattr(args, "anonymous", False),
+            tag=tag,
+        )
+        insights.generate_insights(
+            scores=scores,
+            data=data,
+            outdir=str(outdir_path),
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            small_pr_threshold=float(((cfg.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300),
+            tag=tag,
+        )
+        console.print(f"\n[bold green]✓ Reports regenerated in {outdir_path}[/bold green]")
+        return 0
 
     # Interactive mode: if no repo-url is provided
     if args.repo_url is None:
@@ -265,9 +392,9 @@ def main(argv=None) -> int:
         # Prompt for other parameters
         days = _prompt_days()
         
-        # Calculate default output directory with repo name and current date
+        # Default output directory inside the repository workspace
         now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
-        default_outdir = str(Path.home() / "Desktop" / f"Reports ({repo}), ({now:%m-%d-%Y})")
+        default_outdir = str(Path.cwd() / "reports")
         outdir = _prompt_output_dir(default_outdir)
         config_path = _prompt_config_file()
         
@@ -285,9 +412,9 @@ def main(argv=None) -> int:
         
         days = args.days if args.days is not None else 90
         
-        # Calculate default output directory with repo name and current date
+        # Default output directory inside the repository workspace
         now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
-        default_outdir = str(Path.home() / "Desktop" / f"Reports ({repo}), ({now:%m-%d-%Y})")
+        default_outdir = str(Path.cwd() / "reports")
         outdir = args.outdir if args.outdir is not None else default_outdir
         config_path = args.config
 
