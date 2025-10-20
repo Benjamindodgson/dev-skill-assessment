@@ -16,6 +16,9 @@ except Exception:  # pragma: no cover
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.table import Table
+from rich.panel import Panel
+from rich.box import ROUNDED
 
 from . import collect, metrics, report, insights
 
@@ -278,6 +281,55 @@ def _derive_tag_from_raw_filename(p: Path) -> Optional[str]:
     return None
 
 
+def _print_terminal_summary(
+    console: Console,
+    scores: Dict[str, Any],
+    owner: str,
+    repo: str,
+    since_iso: str,
+    until_iso: str,
+    named: bool = True,
+) -> None:
+    team = scores.get("team", {})
+    devs = scores.get("developers", [])
+
+    title = f"{owner}/{repo} — {since_iso[:10]} → {until_iso[:10]}"
+    team_score = float(team.get("score", 0.0))
+    console.print(
+        Panel.fit(
+            f"Team Score: {team_score:.2f}",
+            title="[bold]DevSkill Assessment[/bold]",
+            subtitle=title,
+            border_style="cyan",
+            box=ROUNDED,
+        )
+    )
+
+    table = Table(box=ROUNDED, header_style="bold cyan", show_lines=False)
+    table.add_column("#", justify="right")
+    table.add_column("Developer", justify="left")
+    table.add_column("Score", justify="right")
+    table.add_column("Delivery", justify="right")
+    table.add_column("Collaboration", justify="right")
+    table.add_column("Hygiene", justify="right")
+    table.add_column("Stability", justify="right")
+
+    for idx, row in enumerate(devs, 1):
+        name = row.get("developer", "unknown") if named else "dev-***"
+        subs = row.get("subscores", {})
+        table.add_row(
+            str(idx),
+            str(name),
+            f"{float(row.get('score', 0.0)):.2f}",
+            f"{float(subs.get('delivery', 0.0)):.2f}",
+            f"{float(subs.get('collaboration', 0.0)):.2f}",
+            f"{float(subs.get('hygiene', 0.0)):.2f}",
+            f"{float(subs.get('stability', 0.0)):.2f}",
+        )
+
+    console.print(table)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser("devskill")
     subparsers = p.add_subparsers(dest="command")
@@ -369,6 +421,15 @@ def main(argv=None) -> int:
             until_iso=until_iso,
             small_pr_threshold=float(((cfg.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300),
             tag=tag,
+        )
+        _print_terminal_summary(
+            console=console,
+            scores=scores,
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            named=not getattr(args, "anonymous", False),
         )
         console.print(f"\n[bold green]✓ Reports regenerated in {outdir_path}[/bold green]")
         return 0
@@ -519,6 +580,15 @@ def main(argv=None) -> int:
         until_iso=until_iso,
         small_pr_threshold=float(((cfg.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300),
         tag=tag,
+    )
+    _print_terminal_summary(
+        console=console,
+        scores=scores,
+        owner=owner,
+        repo=repo,
+        since_iso=since_iso,
+        until_iso=until_iso,
+        named=True,
     )
     console.print(f"\n[bold green]✓ Reports written to {outdir_path}[/bold green]")
     return 0
