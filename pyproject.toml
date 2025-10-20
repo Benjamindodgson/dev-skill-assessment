@@ -22,9 +22,13 @@ Repository = "https://github.com/Benjamindodgson/dev-skill-assessment"
 
 [project.scripts]
 devskill = "devskill.cli:main"
+qaskill = "devskill.qa.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["devskill"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["devskill*"]
 
 

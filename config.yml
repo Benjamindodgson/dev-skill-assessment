@@ -42,3 +42,14 @@ exclude:
   - benjamindodgson
   - cursor
 
+# QA assessment configuration (Azure DevOps)
+qa:
+  users: []
+  aliases: {}
+  exclude: []
+  weights:
+    testing: 0.30
+    defects: 0.30
+    hygiene: 0.20
+    responsiveness: 0.20
+
