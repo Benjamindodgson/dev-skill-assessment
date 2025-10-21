@@ -73,15 +73,39 @@ def _request_json(method: str, url: str, token: str, retries: int = 5, backoff: 
     raise RuntimeError("Request failed after retries")
 
 
+def _normalize_ado_datetime(dt_str: str) -> str:
+    """Normalize various ISO8601 inputs to Azure DevOps-friendly format.
+
+    Azure DevOps APIs expect UTC timestamps like YYYY-MM-DDTHH:MM:SSZ.
+    This function parses common ISO8601 variants (including "+00:00" tz and
+    microseconds) and returns a compact Zulu-time string without microseconds.
+    """
+    try:
+        s = (dt_str or "").strip()
+        if not s:
+            return s
+        # Support both trailing 'Z' and explicit timezone offset
+        s = s.replace("Z", "+00:00")
+        parsed = dt.datetime.fromisoformat(s)
+        parsed_utc = parsed.astimezone(dt.timezone.utc).replace(microsecond=0)
+        return parsed_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        # If parsing fails, fall back to original string
+        return dt_str
+
+
 def _list_test_runs(org: str, project: str, token: str, since_iso: str, until_iso: str, progress_callback: Optional[Callable[[str, int], None]] = None) -> List[Dict[str, Any]]:
     # Date filters use ISO; limit to top 1000 for performance
-    url = (
-        f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/test/runs"
-        f"?minLastUpdatedDate={since_iso}&maxLastUpdatedDate={until_iso}&$top=1000&api-version=7.1-preview.1"
-    )
+    url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/test/runs"
+    params = {
+        "minLastUpdatedDate": _normalize_ado_datetime(since_iso),
+        "maxLastUpdatedDate": _normalize_ado_datetime(until_iso),
+        "$top": "1000",
+        "api-version": "7.1-preview.1",
+    }
     if progress_callback:
         progress_callback("fetching", 0)
-    payload = _request_json("GET", url, token)
+    payload = _request_json("GET", url, token, params=params)
     runs = payload.get("value", [])
     if progress_callback:
         progress_callback("complete", len(runs))
@@ -101,8 +125,9 @@ def _list_test_runs(org: str, project: str, token: str, since_iso: str, until_is
 
 def _list_test_results_for_run(org: str, project: str, run_id: int, token: str) -> List[Dict[str, Any]]:
     # Note: results endpoint is preview; cap at 1000
-    url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/test/Runs/{run_id}/results?$top=1000&api-version=7.1-preview.6"
-    payload = _request_json("GET", url, token)
+    url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/test/Runs/{run_id}/results"
+    params = {"$top": "1000", "api-version": "7.1-preview.6"}
+    payload = _request_json("GET", url, token, params=params)
     results = payload.get("value", [])
     out: List[Dict[str, Any]] = []
     for res in results:
@@ -127,14 +152,14 @@ def _list_test_results_for_run(org: str, project: str, run_id: int, token: str) 
 
 
 def _wiql_query_bugs(org: str, project: str, token: str, since_iso: str, until_iso: str) -> List[int]:
-    url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/wit/wiql?api-version=7.1-preview.2"
+    url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/wit/wiql"
     query = (
         "SELECT [System.Id] FROM WorkItems "
         "WHERE [System.WorkItemType] = 'Bug' "
-        f"AND [System.CreatedDate] >= '{since_iso}' AND [System.CreatedDate] <= '{until_iso}' "
+        f"AND [System.CreatedDate] >= '{_normalize_ado_datetime(since_iso)}' AND [System.CreatedDate] <= '{_normalize_ado_datetime(until_iso)}' "
         "ORDER BY [System.ChangedDate] DESC"
     )
-    payload = _request_json("POST", url, token, json={"query": query})
+    payload = _request_json("POST", url, token, params={"api-version": "7.1-preview.2"}, json={"query": query})
     work_items = payload.get("workItems", [])
     return [int(wi.get("id")) for wi in work_items if wi.get("id")]
 
@@ -147,11 +172,9 @@ def _work_items_batch(org: str, project: str, token: str, ids: List[int]) -> Lis
         if not chunk:
             continue
         joined = ",".join(str(x) for x in chunk)
-        url = (
-            f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/wit/workitems"
-            f"?ids={joined}&$expand=Relations&api-version=7.1-preview.3"
-        )
-        payload = _request_json("GET", url, token)
+        url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/wit/workitems"
+        params = {"ids": joined, "$expand": "Relations", "api-version": "7.1-preview.3"}
+        payload = _request_json("GET", url, token, params=params)
         out.extend(payload.get("value", []))
         time.sleep(0.2)
     return out
@@ -202,8 +225,48 @@ def collect_qa_data(
         cached_results = None
         cached_bugs = None
 
+    project_for_api = project_id or project
+
     if cached_runs is None:
-        runs = _list_test_runs(org, project, token, since_iso, until_iso, on_runs_progress)
+        # Prefer project GUID when available, but some ADO Test APIs 404 on GUID path.
+        # In that case, retry with the human-readable project name.
+        attempts = []
+        primary = project_id or project
+        if primary:
+            attempts.append(primary)
+        if project_id and project and project != project_id:
+            attempts.append(project)
+
+        last_err: Optional[Exception] = None
+        runs = []
+        for candidate in attempts or [project]:
+            try:
+                runs = _list_test_runs(org, candidate, token, since_iso, until_iso, on_runs_progress)
+                project_for_api = candidate
+                last_err = None
+                break
+            except requests.exceptions.HTTPError as e:  # type: ignore[attr-defined]
+                # Only fall back on 404; other errors should surface.
+                status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
+                if status == 404:
+                    last_err = e
+                    continue
+                raise
+            except Exception as e:
+                last_err = e
+                break
+
+        if last_err:
+            # If all attempts returned 404, treat as no Test Runs available for this project
+            # (e.g., Test Plans disabled). Continue to collect bugs.
+            status = getattr(last_err, "response", None).status_code if getattr(last_err, "response", None) is not None else None
+            if status == 404:
+                runs = []
+                if on_runs_progress:
+                    on_runs_progress("complete", 0)
+            else:
+                raise last_err
+
         if cache:
             _cache_set(cache, runs_key, {"items": runs})
     else:
@@ -222,7 +285,16 @@ def collect_qa_data(
             run_id = r.get("id")
             if run_id is None:
                 continue
-            res = _list_test_results_for_run(org, project, int(run_id), token)
+            # Try with the chosen project identifier; on 404, retry with project name
+            try:
+                res = _list_test_results_for_run(org, project_for_api, int(run_id), token)
+            except requests.exceptions.HTTPError as e:  # type: ignore[attr-defined]
+                status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
+                if status == 404 and project and project != project_for_api:
+                    res = _list_test_results_for_run(org, project, int(run_id), token)
+                    project_for_api = project
+                else:
+                    raise
             results.extend(res)
             count += len(res)
             if on_runs_progress:
@@ -241,12 +313,48 @@ def collect_qa_data(
     if cached_bugs is None:
         if on_bugs_progress:
             on_bugs_progress("fetching", 0)
-        bug_ids = _wiql_query_bugs(org, project, token, since_iso, until_iso)
-        bugs = _work_items_batch(org, project, token, bug_ids)
-        if on_bugs_progress:
-            on_bugs_progress("complete", len(bugs))
-        if cache:
-            _cache_set(cache, bugs_key, {"items": bugs})
+        # Similar to Test APIs, WIQL can behave differently for GUID vs name. Try both.
+        bug_ids: List[int] = []
+        wit_attempts: List[str] = []
+        primary_wit = project_for_api or project
+        if primary_wit:
+            wit_attempts.append(primary_wit)
+        if project and project != primary_wit:
+            wit_attempts.append(project)
+
+        wit_last_err: Optional[Exception] = None
+        for candidate in wit_attempts or [project]:
+            try:
+                bug_ids = _wiql_query_bugs(org, candidate, token, since_iso, until_iso)
+                project_for_api = candidate
+                wit_last_err = None
+                break
+            except requests.exceptions.HTTPError as e:  # type: ignore[attr-defined]
+                status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
+                if status in (400, 404):
+                    wit_last_err = e
+                    continue
+                raise
+            except Exception as e:
+                wit_last_err = e
+                break
+
+        if wit_last_err:
+            status = getattr(wit_last_err, "response", None).status_code if getattr(wit_last_err, "response", None) is not None else None
+            if status in (400, 404):
+                bugs = []
+                if on_bugs_progress:
+                    on_bugs_progress("complete", 0)
+                if cache:
+                    _cache_set(cache, bugs_key, {"items": bugs})
+            else:
+                raise wit_last_err
+        else:
+            bugs = _work_items_batch(org, project_for_api, token, bug_ids) if bug_ids else []
+            if on_bugs_progress:
+                on_bugs_progress("complete", len(bugs))
+            if cache:
+                _cache_set(cache, bugs_key, {"items": bugs})
     else:
         bugs = cached_bugs.get("items", [])
         if on_bugs_progress:

@@ -55,7 +55,7 @@ def _improvement_tip(area: str, row: Dict[str, Any], team_medians: Dict[str, flo
     if area == "testing":
         you = float(row.get("testing.pass_rate", 0.0))
         team = float(team_medians.get("testing.pass_rate", 0.0))
-        return f"Increase pass rate (you {you:.0%}, team {team:.0%}). Pair with devs to clarify acceptance.")
+        return f"Increase pass rate (you {you:.0%}, team {team:.0%}). Pair with devs to clarify acceptance."
     if area == "defects":
         you = float(row.get("defects.valid_ratio", 0.0))
         team = float(team_medians.get("defects.valid_ratio", 0.0))
