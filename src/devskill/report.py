@@ -94,25 +94,26 @@ def generate_reports(
     lines.append("")
     # Azure DevOps bug quality signals table (optional)
     has_bug_signals = any(
-        float(d.get("stability.bug_qa_failed", 0) or 0) > 0
+        float(d.get("stability.bug_qa_failed_entries", 0) or 0) > 0
         or float(d.get("stability.bug_resolution_count", 0) or 0) > 0
         for d in devs
     )
     if has_bug_signals:
         lines.append("## Azure DevOps bug signals")
         lines.append("")
-        lines.append("| Developer | QA Failed bugs | Ready→Resolved median (h) | Resolved bugs |")
+        lines.append("| Developer | QA Failed entries | Ready→Resolved median (h) | Resolved bugs |")
         lines.append("|---|---:|---:|---:|")
         for d in devs:
             dev_name = d.get("developer") if named else "dev-***"
-            qa_failed = float(d.get("stability.bug_qa_failed", 0) or 0)
+            qa_failed_entries = float(d.get("stability.bug_qa_failed_entries", 0) or 0)
             median_h = float(d.get("stability.bug_resolution_median_h", 0) or 0)
             resolved = float(d.get("stability.bug_resolution_count", 0) or 0)
-            lines.append(f"| {dev_name} | {qa_failed:.0f} | {median_h:.1f} | {resolved:.0f} |")
+            lines.append(f"| {dev_name} | {qa_failed_entries:.0f} | {median_h:.1f} | {resolved:.0f} |")
         lines.append("")
     lines.append("### Notes")
     lines.append("- Metrics are proxies; interpret alongside context.")
     lines.append("- Weekends excluded from review responsiveness metrics.")
+    lines.append("- QA Failed entries count each time a linked bug enters a QA Failed state, including re-entries.")
     lines.append("- Weights: delivery 30%, collaboration 25%, hygiene 15%, stability 30%.")
 
     md_path.write_text("\n".join(lines), encoding="utf-8")

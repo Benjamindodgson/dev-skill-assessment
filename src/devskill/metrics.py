@@ -128,6 +128,7 @@ def compute_scores(
         "post_merge_fix_within_48h": 0,
         "commits": 0,
         "bug_qa_failed": 0,
+        "bug_qa_failed_entries": 0,
         "bug_resolution_hours": [],
         "bug_resolution_count": 0,
     })
@@ -192,7 +193,7 @@ def compute_scores(
         fields = bug.get("fields", {}) or {}
         initial_state = str(fields.get("System.State") or "").lower()
         created_date = _parse_iso(fields.get("System.CreatedDate") or "")
-        qa_failed = initial_state in qa_failed_states
+        qa_failed_entries = 1 if initial_state in qa_failed_states else 0
         ready_enter: Optional[dt.datetime] = created_date if initial_state in ready_states else None
         resolved_at: Optional[dt.datetime] = created_date if initial_state in resolved_states else None
 
@@ -210,8 +211,8 @@ def compute_scores(
 
         events.sort(key=lambda x: x[0])
         for when, old_state, new_state in events:
-            if new_state in qa_failed_states:
-                qa_failed = True
+            if new_state in qa_failed_states and old_state not in qa_failed_states:
+                qa_failed_entries += 1
             if new_state in ready_states and ready_enter is None:
                 ready_enter = when
             if new_state in resolved_states and resolved_at is None and ready_enter is not None:
@@ -219,7 +220,7 @@ def compute_scores(
         resolution_hours: Optional[float] = None
         if ready_enter and resolved_at and resolved_at >= ready_enter:
             resolution_hours = (resolved_at - ready_enter).total_seconds() / 3600.0
-        return qa_failed, resolution_hours
+        return qa_failed_entries, resolution_hours
 
     if bug_by_id:
         seen_by_dev: Dict[str, set] = defaultdict(set)
@@ -237,8 +238,10 @@ def compute_scores(
                 bug = bug_by_id.get(bid_int)
                 if not bug:
                     continue
-                hit_qa_failed, res_hours = analyze_bug(bug)
-                if hit_qa_failed:
+                qa_failed_entries, res_hours = analyze_bug(bug)
+                if qa_failed_entries > 0:
+                    per_dev[author]["bug_qa_failed_entries"] += qa_failed_entries
+                    # retain a binary counter for backward compatibility
                     per_dev[author]["bug_qa_failed"] += 1
                 if res_hours is not None:
                     per_dev[author]["bug_resolution_hours"].append(res_hours)
@@ -294,7 +297,7 @@ def compute_scores(
         change_requests = agg["change_requests"]
         reopened = agg["reopened_prs"]
         fix48 = agg["post_merge_fix_within_48h"]
-        qa_failed_bugs = agg["bug_qa_failed"]
+        qa_failed_entries = agg.get("bug_qa_failed_entries", agg.get("bug_qa_failed", 0))
         bug_resolved = agg["bug_resolution_count"]
         bug_res_median = _median(agg["bug_resolution_hours"]) if agg["bug_resolution_hours"] else 0.0
 
@@ -313,7 +316,7 @@ def compute_scores(
             "stability.change_requests": float(change_requests),
             "stability.reopened_prs": float(reopened),
             "stability.fix48": float(fix48),
-            "stability.bug_qa_failed": float(qa_failed_bugs),
+            "stability.bug_qa_failed_entries": float(qa_failed_entries),
             "stability.bug_resolution_median_h": float(bug_res_median),
             "stability.bug_resolution_count": float(bug_resolved),
             "activity.commits": float(agg["commits"]),
@@ -351,7 +354,7 @@ def compute_scores(
     s1 = norm_field(dev_rows, "stability.change_requests", False)
     s2 = norm_field(dev_rows, "stability.reopened_prs", False)
     s3 = norm_field(dev_rows, "stability.fix48", True)
-    s4 = norm_field(dev_rows, "stability.bug_qa_failed", False)
+    s4 = norm_field(dev_rows, "stability.bug_qa_failed_entries", False)
     s5 = norm_field(dev_rows, "stability.bug_resolution_median_h", False)
     stability = [
         0.25 * a + 0.2 * b + 0.15 * c + 0.2 * d + 0.2 * e

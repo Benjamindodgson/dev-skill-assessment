@@ -50,7 +50,9 @@ def _fetch_work_item_updates(org_url: str, work_item_id: str) -> List[Dict]:
                     "--area",
                     "wit",
                     "--resource",
-                    f"workitems/{work_item_id}/updates",
+                    "workitems/{id}/updates",
+                    "--route-parameters",
+                    f"id={work_item_id}",
                     "--api-version",
                     api_ver,
                     "--organization",
@@ -61,6 +63,9 @@ def _fetch_work_item_updates(org_url: str, work_item_id: str) -> List[Dict]:
         except RuntimeError as exc:
             last_exc = exc
             msg = str(exc).lower()
+            # Retry with the next API version when the resource/version pair is rejected.
+            if "--resource and --api-version combination is not correct" in msg and api_ver != api_versions[-1]:
+                continue
             # Azure CLI can choke on preview API versions when parsing as floats.
             if "could not convert string to float" in msg and api_ver != api_versions[-1]:
                 continue
