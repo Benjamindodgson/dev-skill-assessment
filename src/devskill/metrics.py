@@ -109,8 +109,20 @@ def compute_scores(
     ado_bug_items = data.get("ado_bug_items", []) or []
     ado_pr_bugs = data.get("ado_pr_bugs", {}) or {}
     ado_cfg = config.get("ado") or {}
-    ready_states = {str(s).lower() for s in (ado_cfg.get("ready_states") or ["Ready for Dev"])}
-    resolved_states = {str(s).lower() for s in (ado_cfg.get("resolved_states") or ["Resolved", "Closed", "Done"])}
+    ready_states = {
+        str(s).lower()
+        for s in (
+            ado_cfg.get("ready_states")
+            or ["Ready for Dev"]
+        )
+    }
+    resolved_states = {
+        str(s).lower()
+        for s in (
+            ado_cfg.get("resolved_states")
+            or ["Resolved", "Closed", "Done", "Removed", "Cannot Reproduce"]
+        )
+    }
     qa_failed_states = {str(s).lower() for s in (ado_cfg.get("qa_failed_states") or ["QA Failed"])}
 
     per_dev = defaultdict(lambda: {
@@ -203,20 +215,56 @@ def compute_scores(
                 when = _parse_iso(u.get("revisedDate") or (u.get("fields", {}).get("System.ChangedDate", {}) or {}).get("newValue") or "")
             except Exception:
                 continue
-            state_change = (u.get("fields") or {}).get("System.State") or {}
-            new_state = str(state_change.get("newValue") or "").lower()
-            old_state = str(state_change.get("oldValue") or "").lower()
-            if new_state or old_state:
-                events.append((when, old_state, new_state))
+            change_fields = (u.get("fields") or {})
+
+            # Capture transitions from both System.State and board columns, since ADO
+            # often records Ready/Done movement via Kanban columns instead of state.
+            candidate_changes = []
+            state_change = change_fields.get("System.State") or {}
+            if state_change:
+                candidate_changes.append(state_change)
+            for fname, change in change_fields.items():
+                if fname == "System.BoardColumn" or fname.lower().endswith("kanban.column"):
+                    candidate_changes.append(change or {})
+
+            for change in candidate_changes:
+                try:
+                    new_state = str(change.get("newValue") or "").lower()
+                    old_state = str(change.get("oldValue") or "").lower()
+                except AttributeError:
+                    continue
+                if new_state or old_state:
+                    events.append((when, old_state, new_state))
 
         events.sort(key=lambda x: x[0])
+        resolved_state_value: Optional[str] = None
         for when, old_state, new_state in events:
             if new_state in qa_failed_states and old_state not in qa_failed_states:
                 qa_failed_entries += 1
             if new_state in ready_states and ready_enter is None:
                 ready_enter = when
-            if new_state in resolved_states and resolved_at is None and ready_enter is not None:
-                resolved_at = when
+            if new_state in resolved_states and ready_enter is not None:
+                # Prefer the first transition into Done; otherwise fall back to the earliest resolved state.
+                if resolved_at is None or (new_state == "done" and resolved_state_value != "done"):
+                    resolved_at = when
+                    resolved_state_value = new_state
+
+        # Fallback: if updates are missing but the current state is resolved (e.g., Done),
+        # use the state change date as the resolution timestamp.
+        if resolved_at is None and ready_enter is not None:
+            current_state = initial_state
+            if current_state in resolved_states:
+                fallback_ts = (
+                    fields.get("Microsoft.VSTS.Common.ResolvedDate")
+                    or fields.get("Microsoft.VSTS.Common.ClosedDate")
+                    or fields.get("Microsoft.VSTS.Common.StateChangeDate")
+                )
+                parsed_fallback = _parse_iso(fallback_ts or "")
+                if parsed_fallback.year > 1970:
+                    resolved_at = parsed_fallback
+        # If we have a resolution but never observed a ready transition, treat creation as the ready start.
+        if resolved_at is not None and ready_enter is None:
+            ready_enter = created_date
         resolution_hours: Optional[float] = None
         if ready_enter and resolved_at and resolved_at >= ready_enter:
             resolution_hours = (resolved_at - ready_enter).total_seconds() / 3600.0

@@ -38,7 +38,8 @@ def _run_az(args: List[str], env: Optional[Dict[str, str]] = None) -> Dict:
 
 def _fetch_work_item_updates(org_url: str, work_item_id: str) -> List[Dict]:
     """Fetch work item updates via az devops invoke (works with PAT or AAD auth)."""
-    api_versions = ["7.1-preview.3", "7.1", "7.0"]
+    # Use only stable (non-preview) API versions to avoid preview parsing issues.
+    api_versions = ["7.1", "7.0", "6.0"]
     last_exc: Optional[Exception] = None
 
     for api_ver in api_versions:

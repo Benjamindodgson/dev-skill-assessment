@@ -345,6 +345,33 @@ def _print_terminal_summary(
 
     console.print(table)
 
+    # Azure DevOps bug signals (only if present)
+    has_bug_signals = any(
+        float(row.get("stability.bug_qa_failed_entries", 0) or 0) > 0
+        or float(row.get("stability.bug_resolution_count", 0) or 0) > 0
+        for row in devs
+    )
+    if has_bug_signals:
+        bug_table = Table(box=ROUNDED, header_style="bold cyan", show_lines=False, title="Azure DevOps bug signals")
+        bug_table.add_column("Developer", justify="left")
+        bug_table.add_column("QA Failed entries", justify="right")
+        bug_table.add_column("Ready→Resolved median (h)", justify="right")
+        bug_table.add_column("Resolved bugs", justify="right")
+
+        for row in devs:
+            name = row.get("developer", "unknown") if named else "dev-***"
+            qa_failed_entries = float(row.get("stability.bug_qa_failed_entries", 0) or 0)
+            bug_median_h = float(row.get("stability.bug_resolution_median_h", 0) or 0)
+            bug_resolved = float(row.get("stability.bug_resolution_count", 0) or 0)
+            bug_table.add_row(
+                str(name),
+                f"{qa_failed_entries:.0f}",
+                f"{bug_median_h:.1f}",
+                f"{bug_resolved:.0f}",
+            )
+
+        console.print(bug_table)
+
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser("devskill")

@@ -367,6 +367,24 @@ def generate_insights(
     lines.append(f"Window: { _fmt_pretty_date(since_iso) } → { _fmt_pretty_date(until_iso) }")
     lines.append("")
 
+    has_bug_signals = any(
+        float(d.get("stability.bug_qa_failed_entries", 0) or 0) > 0
+        or float(d.get("stability.bug_resolution_count", 0) or 0) > 0
+        for d in devs
+    )
+    if has_bug_signals:
+        lines.append("## Azure DevOps bug signals")
+        lines.append("")
+        lines.append("| Developer | QA Failed entries | Ready→Resolved median (h) | Resolved bugs |")
+        lines.append("|---|---:|---:|---:|")
+        for d in devs:
+            name = d.get("developer", "unknown")
+            qa_failed_entries = float(d.get("stability.bug_qa_failed_entries", 0) or 0)
+            bug_median = float(d.get("stability.bug_resolution_median_h", 0) or 0)
+            bug_resolved = float(d.get("stability.bug_resolution_count", 0) or 0)
+            lines.append(f"| {name} | {qa_failed_entries:.0f} | {bug_median:.1f} | {bug_resolved:.0f} |")
+        lines.append("")
+
     for d in devs:
         name = d.get("developer", "unknown")
         subs = d.get("subscores", {})
