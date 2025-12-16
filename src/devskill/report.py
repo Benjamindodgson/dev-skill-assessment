@@ -92,6 +92,24 @@ def generate_reports(
             f"| {dev_name} | {d.get('score')} | {subs.get('delivery')} | {subs.get('collaboration')} | {subs.get('hygiene')} | {subs.get('stability')} |"
         )
     lines.append("")
+    # Azure DevOps bug quality signals table (optional)
+    has_bug_signals = any(
+        float(d.get("stability.bug_qa_failed", 0) or 0) > 0
+        or float(d.get("stability.bug_resolution_count", 0) or 0) > 0
+        for d in devs
+    )
+    if has_bug_signals:
+        lines.append("## Azure DevOps bug signals")
+        lines.append("")
+        lines.append("| Developer | QA Failed bugs | Ready→Resolved median (h) | Resolved bugs |")
+        lines.append("|---|---:|---:|---:|")
+        for d in devs:
+            dev_name = d.get("developer") if named else "dev-***"
+            qa_failed = float(d.get("stability.bug_qa_failed", 0) or 0)
+            median_h = float(d.get("stability.bug_resolution_median_h", 0) or 0)
+            resolved = float(d.get("stability.bug_resolution_count", 0) or 0)
+            lines.append(f"| {dev_name} | {qa_failed:.0f} | {median_h:.1f} | {resolved:.0f} |")
+        lines.append("")
     lines.append("### Notes")
     lines.append("- Metrics are proxies; interpret alongside context.")
     lines.append("- Weekends excluded from review responsiveness metrics.")

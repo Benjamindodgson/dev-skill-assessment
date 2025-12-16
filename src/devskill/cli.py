@@ -353,6 +353,12 @@ def main(argv=None) -> int:
     p.add_argument("--outdir", default=None, help="Output directory (default: ./reports)")
     p.add_argument("--config", default=None)
     p.add_argument("--no-cache", action="store_true")
+    p.add_argument("--ado-org", default=None, help="Azure DevOps org (e.g., ecolabcommercialsolutions or https://dev.azure.com/org)")
+    p.add_argument("--ado-project", default=None, help="Azure DevOps project name")
+    p.add_argument("--ado-ready-states", default=None, help="Comma-separated states considered Ready for Dev")
+    p.add_argument("--ado-resolved-states", default=None, help="Comma-separated states considered Resolved/Closed")
+    p.add_argument("--ado-qa-failed-states", default=None, help="Comma-separated states representing QA Failed")
+    p.add_argument("--ado-disable", action="store_true", help="Disable Azure DevOps bug enrichment even if org/project provided")
     args = p.parse_args(argv)
 
     # Handle rerun subcommand: reuse last raw JSON, recompute metrics, regenerate reports/insights
@@ -502,6 +508,19 @@ def main(argv=None) -> int:
 
     cfg = _load_config(config_path)
     bots = list(cfg.get("bots", []))
+    ado_cfg = cfg.get("ado") or {}
+    ado_org = args.ado_org or ado_cfg.get("org")
+    ado_project = args.ado_project or ado_cfg.get("project")
+
+    def _states(value: Optional[str], fallback: Any) -> List[str]:
+        if value:
+            return [s.strip() for s in value.split(",") if s.strip()]
+        return list(fallback or [])
+
+    ado_ready_states = _states(args.ado_ready_states, ado_cfg.get("ready_states"))
+    ado_resolved_states = _states(args.ado_resolved_states, ado_cfg.get("resolved_states"))
+    ado_qa_failed_states = _states(args.ado_qa_failed_states, ado_cfg.get("qa_failed_states"))
+    ado_disable = bool(args.ado_disable or not (ado_org and ado_project))
 
     outdir_path = Path(outdir)
     outdir_path.mkdir(parents=True, exist_ok=True)
@@ -554,6 +573,12 @@ def main(argv=None) -> int:
             use_cache=not args.no_cache,
             on_prs_progress=on_prs_progress,
             on_commits_progress=on_commits_progress,
+            ado_org=ado_org,
+            ado_project=ado_project,
+            ado_ready_states=ado_ready_states,
+            ado_resolved_states=ado_resolved_states,
+            ado_qa_failed_states=ado_qa_failed_states,
+            ado_disable=ado_disable,
         )
     
     console.print()

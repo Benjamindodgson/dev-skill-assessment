@@ -206,6 +206,10 @@ def main(argv=None) -> int:
     parser.add_argument("--qa-users", default=None, help="Comma-separated list of QA users")
     parser.add_argument("--outdir", default=None, help="Output directory (default: ./reports)")
     parser.add_argument("--config", default=None)
+    parser.add_argument("--debug-users", action="store_true", help="Include identity matching debug in raw output")
+    parser.add_argument("--debug-api", action="store_true", help="Include API request parameters in raw output")
+    parser.add_argument("--no-user-filter", action="store_true", help="Do not filter by qa users; include all testers and authors")
+    parser.add_argument("--run-id", action="append", type=int, help="Force inclusion of specific Test Run ID(s); can be passed multiple times")
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args(argv)
 
@@ -299,6 +303,8 @@ def main(argv=None) -> int:
     if args.qa_users:
         default_users = [x.strip() for x in args.qa_users.split(",") if x.strip()]
     qa_users = _prompt_qa_users(default_users)
+    bug_types = qa_cfg.get("bug_types") or ["Bug", "Defect"]
+    alias_map = qa_cfg.get("aliases") or {}
 
     # Ensure cache/out dirs
     outdir_path = Path(outdir)
@@ -347,6 +353,12 @@ def main(argv=None) -> int:
             until_iso=until_iso,
             token=token,
             qa_users=qa_users,
+            bug_types=bug_types,
+            aliases=alias_map,
+            disable_user_filter=getattr(args, "no_user_filter", False),
+            debug_users=getattr(args, "debug_users", False),
+            debug_api=getattr(args, "debug_api", False),
+            force_run_ids=getattr(args, "run_id", None),
             cache_dir=str(cache_dir),
             use_cache=not args.no_cache,
             on_runs_progress=on_runs_progress,

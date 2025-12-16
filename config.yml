@@ -41,12 +41,30 @@ exclude:
   - unknown
   - benjamindodgson
   - cursor
+  - snyk-bot
+
+# Azure DevOps bug enrichment (optional)
+# When set, devskill will parse PR titles for AB#<id> and pull ADO work items
+# to add QA-failed counts and Ready-for-Dev -> Resolved durations per author.
+ado:
+  org: ecolabcommercialsolutions
+  project: Pest Commercial Solutions
+  ready_states: ["Ready for Dev"]
+  resolved_states: ["Resolved", "Closed", "Done"]
+  qa_failed_states: ["QA Failed"]
 
 # QA assessment configuration (Azure DevOps)
 qa:
   users: [samina.wasey@ecolab.com,simran.rijal@ecolab.com,nishitha.voleti@ecolab.com,raja.kattoju@ecolab.com,christian.gomez@ecolab.com]
   aliases: {}
   exclude: []
+  # Work item types to include for story/defect analysis (team adjustable)
+  story_types: ["Product Backlog Item", "Bug", "Feature", "Epic"]
+  # States considered part of QA workflow (used for time-in-state metrics)
+  qa_states: ["QA Failed", "Ready for Test", "In Test", "Done"]
+  # Toggle additional data collection (comments/updates) for deeper metrics
+  include_comments: true
+  include_updates: true
   weights:
     testing: 0.30
     defects: 0.30

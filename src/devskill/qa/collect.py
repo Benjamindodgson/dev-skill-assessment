@@ -151,11 +151,15 @@ def _list_test_results_for_run(org: str, project: str, run_id: int, token: str) 
     return out
 
 
-def _wiql_query_bugs(org: str, project: str, token: str, since_iso: str, until_iso: str) -> List[int]:
+def _wiql_query_bugs(org: str, project: str, token: str, since_iso: str, until_iso: str, work_item_types: Optional[List[str]] = None) -> List[int]:
     url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/wit/wiql"
+    types = [t for t in (work_item_types or ["Bug"]) if t]
+    if not types:
+        types = ["Bug"]
+    types_clause = ", ".join(f"'{t}'" for t in types)
     query = (
         "SELECT [System.Id] FROM WorkItems "
-        "WHERE [System.WorkItemType] = 'Bug' "
+        f"WHERE [System.WorkItemType] IN ({types_clause}) "
         f"AND [System.CreatedDate] >= '{_normalize_ado_datetime(since_iso)}' AND [System.CreatedDate] <= '{_normalize_ado_datetime(until_iso)}' "
         "ORDER BY [System.ChangedDate] DESC"
     )
@@ -202,6 +206,12 @@ def collect_qa_data(
     until_iso: str,
     token: str,
     qa_users: Iterable[str],
+    bug_types: Optional[Iterable[str]] = None,
+    aliases: Optional[Dict[str, str]] = None,
+    disable_user_filter: bool = False,
+    debug_users: bool = False,
+    debug_api: bool = False,
+    force_run_ids: Optional[Iterable[int]] = None,
     cache_dir: Optional[str] = None,
     use_cache: bool = True,
     on_runs_progress: Optional[Callable[[str, int], None]] = None,
@@ -226,35 +236,51 @@ def collect_qa_data(
         cached_bugs = None
 
     project_for_api = project_id or project
+    api_debug: Dict[str, Any] = {"project_attempts": []} if debug_api else {}
 
     if cached_runs is None:
-        # Prefer project GUID when available, but some ADO Test APIs 404 on GUID path.
-        # In that case, retry with the human-readable project name.
-        attempts = []
-        primary = project_id or project
-        if primary:
-            attempts.append(primary)
-        if project_id and project and project != project_id:
-            attempts.append(project)
-
+        # Initialize defaults for both forced and discovered run flows
+        runs: List[Dict[str, Any]] = []
         last_err: Optional[Exception] = None
-        runs = []
-        for candidate in attempts or [project]:
-            try:
-                runs = _list_test_runs(org, candidate, token, since_iso, until_iso, on_runs_progress)
-                project_for_api = candidate
-                last_err = None
-                break
-            except requests.exceptions.HTTPError as e:  # type: ignore[attr-defined]
-                # Only fall back on 404; other errors should surface.
-                status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
-                if status == 404:
-                    last_err = e
+        # If explicit run IDs are provided, honor them and skip listing runs
+        if force_run_ids:
+            runs = [{"id": int(rid)} for rid in force_run_ids if rid is not None]
+            if on_runs_progress:
+                on_runs_progress("complete", len(runs))
+            if debug_api:
+                api_debug["runs_forced"] = {"ids": [r.get("id") for r in runs]}
+            if cache:
+                _cache_set(cache, runs_key, {"items": runs})
+        else:
+            # Prefer project GUID when available, but some ADO Test APIs 404 on GUID path.
+            # In that case, retry with the human-readable project name.
+            attempts = []
+            primary = project_id or project
+            if primary:
+                attempts.append(primary)
+            if project_id and project and project != project_id:
+                attempts.append(project)
+
+            for idx, candidate in enumerate(attempts or [project]):
+                try:
+                    runs = _list_test_runs(org, candidate, token, since_iso, until_iso, on_runs_progress)
+                    # If this candidate returned non-empty results, or this is the last attempt, accept it.
+                    project_for_api = candidate
+                    last_err = None
+                    if runs or idx == (len(attempts or [project]) - 1):
+                        break
+                    # Otherwise, continue to try the next candidate (e.g., switch from GUID to name)
                     continue
-                raise
-            except Exception as e:
-                last_err = e
-                break
+                except requests.exceptions.HTTPError as e:  # type: ignore[attr-defined]
+                    # Only fall back on 404; other errors should surface.
+                    status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
+                    if status == 404:
+                        last_err = e
+                        continue
+                    raise
+                except Exception as e:
+                    last_err = e
+                    break
 
         if last_err:
             # If all attempts returned 404, treat as no Test Runs available for this project
@@ -267,7 +293,15 @@ def collect_qa_data(
             else:
                 raise last_err
 
-        if cache:
+        if debug_api and not force_run_ids:
+            api_debug["runs_request"] = {
+                "org": org,
+                "project_used": project_for_api,
+                "minLastUpdatedDate": _normalize_ado_datetime(since_iso),
+                "maxLastUpdatedDate": _normalize_ado_datetime(until_iso),
+                "count": len(runs),
+            }
+        if cache and not force_run_ids:
             _cache_set(cache, runs_key, {"items": runs})
     else:
         runs = cached_runs.get("items", [])
@@ -323,12 +357,15 @@ def collect_qa_data(
             wit_attempts.append(project)
 
         wit_last_err: Optional[Exception] = None
-        for candidate in wit_attempts or [project]:
+        for idx, candidate in enumerate(wit_attempts or [project]):
             try:
-                bug_ids = _wiql_query_bugs(org, candidate, token, since_iso, until_iso)
+                bug_ids = _wiql_query_bugs(org, candidate, token, since_iso, until_iso, list(bug_types or []))
                 project_for_api = candidate
                 wit_last_err = None
-                break
+                # Accept if we found ids or this is the last attempt; otherwise try next candidate
+                if bug_ids or idx == (len(wit_attempts or [project]) - 1):
+                    break
+                continue
             except requests.exceptions.HTTPError as e:  # type: ignore[attr-defined]
                 status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
                 if status in (400, 404):
@@ -353,6 +390,16 @@ def collect_qa_data(
             bugs = _work_items_batch(org, project_for_api, token, bug_ids) if bug_ids else []
             if on_bugs_progress:
                 on_bugs_progress("complete", len(bugs))
+            if debug_api:
+                api_debug["bugs_request"] = {
+                    "org": org,
+                    "project_used": project_for_api,
+                    "types": list(bug_types or []),
+                    "created_from": _normalize_ado_datetime(since_iso),
+                    "created_to": _normalize_ado_datetime(until_iso),
+                    "ids_found": len(bug_ids),
+                    "fetched": len(bugs),
+                }
             if cache:
                 _cache_set(cache, bugs_key, {"items": bugs})
     else:
@@ -361,20 +408,57 @@ def collect_qa_data(
             on_bugs_progress("cached", len(bugs))
 
     # Filter to known QA users for results and bugs
-    aliases = {}
+    alias_map = {k.lower(): v for k, v in (aliases or {}).items()}
     qa_list = list(qa_users)
 
     def result_belongs_to_known(res: Dict[str, Any]) -> bool:
         tester = res.get("tester") or {}
-        return _identity_matches(tester, qa_list, aliases)
+        return _identity_matches(tester, qa_list, alias_map)
 
     def bug_belongs_to_known(bug: Dict[str, Any]) -> bool:
         fields = bug.get("fields", {})
         created_by = fields.get("System.CreatedBy") or {}
-        return _identity_matches(created_by, qa_list, aliases)
+        return _identity_matches(created_by, qa_list, alias_map)
 
-    filtered_results = [r for r in results if result_belongs_to_known(r)] if qa_list else results
-    filtered_bugs = [b for b in bugs if bug_belongs_to_known(b)] if qa_list else bugs
+    # Build debug identity summaries before filtering
+    identity_debug: Dict[str, Any] = {}
+    if debug_users:
+        seen_testers = {}
+        for r in results:
+            t = r.get("tester") or {}
+            key = (str(t.get("uniqueName") or "").lower() or str(t.get("displayName") or "").lower() or str(t.get("id") or "").lower())
+            if key not in seen_testers:
+                seen_testers[key] = {
+                    "displayName": t.get("displayName"),
+                    "uniqueName": t.get("uniqueName"),
+                    "id": t.get("id"),
+                    "matches": _identity_matches(t, qa_list, alias_map),
+                }
+        seen_authors = {}
+        for b in bugs:
+            fields = b.get("fields", {})
+            u = fields.get("System.CreatedBy") or {}
+            key = (str(u.get("uniqueName") or "").lower() or str(u.get("displayName") or "").lower() or str(u.get("id") or "").lower())
+            if key not in seen_authors:
+                seen_authors[key] = {
+                    "displayName": u.get("displayName"),
+                    "uniqueName": u.get("uniqueName"),
+                    "id": u.get("id"),
+                    "matches": _identity_matches(u, qa_list, alias_map),
+                }
+        identity_debug = {
+            "qa_users": list(qa_list),
+            "aliases": alias_map,
+            "testers": list(seen_testers.values()),
+            "bug_authors": list(seen_authors.values()),
+        }
+
+    filtered_results = (
+        results if disable_user_filter or not qa_list else [r for r in results if result_belongs_to_known(r)]
+    )
+    filtered_bugs = (
+        bugs if disable_user_filter or not qa_list else [b for b in bugs if bug_belongs_to_known(b)]
+    )
 
     return {
         "org": org,
@@ -386,6 +470,8 @@ def collect_qa_data(
         "test_results": filtered_results,
         "bugs": filtered_bugs,
         "qa_users": qa_list,
+        **({"identity_debug": identity_debug} if debug_users else {}),
+        **({"api_debug": api_debug} if debug_api else {}),
     }
 
 

@@ -2,6 +2,13 @@
 
 Run a 90-day GitHub developer assessment against any repository and export Markdown and JSON reports.
 
+## What the Dev Skill assessment measures
+
+- Purpose: quickly understand delivery, collaboration, hygiene, and stability signals for developers and teams over a recent window (defaults to 90 days).
+- Data inputs: GitHub pull requests, reviews, and commits pulled via GitHub CLI or `GITHUB_TOKEN`, with optional aliases/exclusions/bot filters from `config.yml`.
+- Scoring: weighted pillars (delivery, collaboration, hygiene, stability) produce per-developer subscores and a team average; weights and thresholds are configurable.
+- Outputs: raw JSON, scores/insights JSON, and Markdown reports saved under `--outdir` (e.g., `dev-skill-assessment-*.md` and `dev-skill-assessment-insights-*.md`); you can regenerate reports from cached raw data with `devskill rerun`.
+
 ## Install
 
 ```bash
@@ -45,6 +52,19 @@ devskill \
 - `--outdir`: output directory (default `reports`)
 - `--config`: optional YAML for aliases/bots/weights (see `config.yml`)
 - `--no-cache`: disable local API response caching
+- Azure DevOps bug enrichment (optional):
+  - `--ado-org`: Azure DevOps org (e.g., `ecolabcommercialsolutions` or `https://dev.azure.com/ecolabcommercialsolutions`)
+  - `--ado-project`: Azure DevOps project name (e.g., `Pest Commercial Solutions`)
+  - `--ado-ready-states`: comma-separated Ready-for-Dev state names (default from config)
+  - `--ado-resolved-states`: comma-separated resolved/closed state names (default from config)
+  - `--ado-qa-failed-states`: comma-separated QA Failed state names (default from config)
+  - `--ado-disable`: skip Azure DevOps enrichment even if org/project provided
+
+**Azure DevOps enrichment:** When `ado.org` and `ado.project` are configured (or passed as flags), `devskill` will parse PR titles for `AB#<id>`, fetch those work items via Azure DevOps CLI (`az boards work-item show/updates list`), and add two stability signals per author:
+- Count of linked bugs that ever entered a QA Failed state.
+- Median time from Ready for Dev to Resolved/Closed for linked bugs.
+
+Prereqs: Azure CLI with Azure DevOps extension (`az extension add --name azure-devops`) and an authenticated session (`az devops login` with PAT or `az login`). No enrichment occurs if org/project are omitted or `--ado-disable` is set.
 
 Outputs include repository and date in filenames, e.g. `dev-skill-assessment-OWNER-REPO-YYYY-MM-DD.md` and `dev-skill-assessment-insights-OWNER-REPO-YYYY-MM-DD.md`.
 

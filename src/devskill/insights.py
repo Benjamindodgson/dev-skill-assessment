@@ -383,6 +383,13 @@ def generate_insights(
         for ex in _improvement_examples(improvement, name, data, small_pr_threshold, owner, repo)[:3]:
             lines.append(f"  - {ex}")
         lines.append(f"  Tip: {_improvement_tip(improvement, d, team_meds, small_pr_threshold)}")
+        qa_failed = float(d.get("stability.bug_qa_failed", 0) or 0)
+        bug_resolved = float(d.get("stability.bug_resolution_count", 0) or 0)
+        bug_median = float(d.get("stability.bug_resolution_median_h", 0) or 0)
+        if qa_failed > 0 or bug_resolved > 0:
+            lines.append(
+                f"- Bug signals: QA Failed {qa_failed:.0f}; Ready→Resolved median {bug_median:.1f}h across {bug_resolved:.0f} linked bugs."
+            )
         lines.append("")
 
     md_path.write_text("\n".join(lines), encoding="utf-8")

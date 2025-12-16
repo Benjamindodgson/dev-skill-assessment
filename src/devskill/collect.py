@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 import requests
+import re
+from . import ado
 from requests import exceptions as req_exc
 
 
@@ -251,6 +253,25 @@ def _filter_out_bots(items: Iterable[Dict[str, Any]], bots: Set[str]) -> List[Di
     return out
 
 
+def _extract_bug_ids_from_prs(prs: Iterable[Dict[str, Any]]) -> Dict[int, List[int]]:
+    """Return mapping of PR number -> list of unique ADO bug IDs referenced as AB#123."""
+    pr_to_bugs: Dict[int, List[int]] = {}
+    pattern = re.compile(r"AB#(\d+)", re.IGNORECASE)
+    for pr in prs:
+        title = str(pr.get("title") or "")
+        numbers = []
+        for match in pattern.finditer(title):
+            try:
+                n = int(match.group(1))
+                if n not in numbers:
+                    numbers.append(n)
+            except ValueError:
+                continue
+        if numbers and pr.get("number") is not None:
+            pr_to_bugs[int(pr["number"])] = numbers
+    return pr_to_bugs
+
+
 def collect_repository_data(
     owner: str,
     repo: str,
@@ -262,6 +283,12 @@ def collect_repository_data(
     use_cache: bool = True,
     on_prs_progress: Optional[Callable[[str, int], None]] = None,
     on_commits_progress: Optional[Callable[[str, int], None]] = None,
+    ado_org: Optional[str] = None,
+    ado_project: Optional[str] = None,
+    ado_ready_states: Optional[Iterable[str]] = None,
+    ado_resolved_states: Optional[Iterable[str]] = None,
+    ado_qa_failed_states: Optional[Iterable[str]] = None,
+    ado_disable: bool = False,
 ) -> Dict[str, Any]:
     cache = Path(cache_dir) if cache_dir else None
     if cache:
@@ -300,6 +327,27 @@ def collect_repository_data(
     prs = _filter_out_bots(prs, set(bots))
     commits = _filter_out_bots(commits, set(bots))
 
+    # Azure DevOps bug enrichment (optional)
+    bug_items: List[Dict[str, Any]] = []
+    pr_bug_map: Dict[int, List[int]] = {}
+    if not ado_disable and ado_org and ado_project:
+        pr_bug_map = _extract_bug_ids_from_prs(prs)
+        all_bug_ids: List[int] = sorted({bid for arr in pr_bug_map.values() for bid in arr})
+        if all_bug_ids:
+            bug_items = ado.fetch_work_items(
+                ids=all_bug_ids,
+                org=ado_org,
+                project=ado_project,
+                cache_dir=cache_dir,
+                use_cache=use_cache,
+            )
+        # attach bug ids to PRs for downstream metrics
+        bug_lookup = {pid: bids for pid, bids in pr_bug_map.items()}
+        for pr in prs:
+            num = pr.get("number")
+            if num is not None and int(num) in bug_lookup:
+                pr["bug_ids"] = bug_lookup[int(num)]
+
     return {
         "owner": owner,
         "repo": repo,
@@ -307,6 +355,15 @@ def collect_repository_data(
         "until": until_iso,
         "pull_requests": prs,
         "commits": commits,
+        "ado": {
+            "org": ado_org,
+            "project": ado_project,
+            "ready_states": list(ado_ready_states) if ado_ready_states else [],
+            "resolved_states": list(ado_resolved_states) if ado_resolved_states else [],
+            "qa_failed_states": list(ado_qa_failed_states) if ado_qa_failed_states else [],
+        },
+        "ado_bug_items": bug_items,
+        "ado_pr_bugs": pr_bug_map,
     }
 
 
