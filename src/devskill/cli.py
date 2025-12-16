@@ -281,6 +281,12 @@ def _discover_latest_raw(search_root: Optional[str]) -> Optional[Path]:
     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return candidates[0]
 
+def _resolve_raw_path(raw_arg: Optional[str], outdir_arg: Optional[str]) -> Optional[Path]:
+    """Return explicit raw path or discover the latest raw JSON."""
+    if raw_arg:
+        return Path(raw_arg)
+    return _discover_latest_raw(outdir_arg)
+
 
 def _derive_tag_from_raw_filename(p: Path) -> Optional[str]:
     name = p.name
@@ -348,6 +354,13 @@ def main(argv=None) -> int:
     rerun_p.add_argument("--raw", default=None, help="Path to dev-skill-raw-*.json (optional)")
     rerun_p.add_argument("--tag", default=None, help="Tag to use for regenerated reports (optional)")
     rerun_p.add_argument("--anonymous", action="store_true", help="Generate anonymized developer names")
+    # Rerun-local subcommand preserves previous behavior (no fresh fetch)
+    rerun_local_p = subparsers.add_parser(
+        "rerun-local", help="Regenerate reports from raw data without refetching GitHub"
+    )
+    rerun_local_p.add_argument("--raw", default=None, help="Path to dev-skill-raw-*.json (optional)")
+    rerun_local_p.add_argument("--tag", default=None, help="Tag to use for regenerated reports (optional)")
+    rerun_local_p.add_argument("--anonymous", action="store_true", help="Generate anonymized developer names")
     p.add_argument("--repo-url", required=False, help="owner/repo or GitHub URL")
     p.add_argument("--days", type=int, default=None)
     p.add_argument("--outdir", default=None, help="Output directory (default: ./reports)")
@@ -361,24 +374,153 @@ def main(argv=None) -> int:
     p.add_argument("--ado-disable", action="store_true", help="Disable Azure DevOps bug enrichment even if org/project provided")
     args = p.parse_args(argv)
 
-    # Handle rerun subcommand: reuse last raw JSON, recompute metrics, regenerate reports/insights
+    # Handle rerun subcommand: rerun the previous query by re-collecting data for the same window
     if getattr(args, "command", None) == "rerun":
         console = Console()
-        console.print("[bold cyan]Rerunning from last raw data[/bold cyan]")
+        console.print("[bold cyan]Re-running last query with fresh data[/bold cyan]")
 
-        raw_path: Optional[Path]
-        if getattr(args, "raw", None):
-            raw_path = Path(args.raw)
-            if not raw_path.exists():
-                console.print(f"[red]Raw file not found:[/red] {raw_path}")
-                return 2
-        else:
-            # Search using provided outdir as root if given; else defaults
-            raw_path = _discover_latest_raw(args.outdir)
-            if not raw_path:
-                console.print("[red]No dev-skill-raw-*.json found.[/red]")
-                console.print("Hint: pass --raw PATH or --outdir DIR to search in.")
-                return 2
+        raw_path = _resolve_raw_path(getattr(args, "raw", None), args.outdir)
+        if not raw_path:
+            console.print("[red]No dev-skill-raw-*.json found.[/red]")
+            console.print("Hint: pass --raw PATH or --outdir DIR to search in.")
+            return 2
+        if not raw_path.exists():
+            console.print(f"[red]Raw file not found:[/red] {raw_path}")
+            return 2
+
+        try:
+            with raw_path.open("r", encoding="utf-8") as f:
+                previous_raw = json.load(f)
+        except Exception as e:
+            console.print(f"[red]Failed to read raw JSON:[/red] {e}")
+            return 2
+
+        owner = previous_raw.get("owner")
+        repo = previous_raw.get("repo")
+        since_iso = previous_raw.get("since")
+        until_iso = previous_raw.get("until")
+        if not all([owner, repo, since_iso, until_iso]):
+            console.print("[red]Raw JSON missing required fields (owner, repo, since, until).[/red]")
+            return 2
+
+        ado_meta = previous_raw.get("ado") or {}
+        ado_org = ado_meta.get("org")
+        ado_project = ado_meta.get("project")
+        ado_ready_states = list(ado_meta.get("ready_states") or [])
+        ado_resolved_states = list(ado_meta.get("resolved_states") or [])
+        ado_qa_failed_states = list(ado_meta.get("qa_failed_states") or [])
+        ado_disable = bool(args.ado_disable or not (ado_org and ado_project))
+
+        cfg = _load_config(args.config)
+        bots = list(cfg.get("bots", []))
+
+        # Determine output directory and tag
+        outdir_path = Path(args.outdir) if args.outdir else raw_path.parent
+        outdir_path.mkdir(parents=True, exist_ok=True)
+
+        tag = args.tag or _derive_tag_from_raw_filename(raw_path) or f"{owner}-{repo}-{dt.datetime.utcnow():%Y-%m-%d}"
+
+        cache_dir = Path.cwd() / ".cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            token = _get_github_token()
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+            return 2
+
+        console.print(f"[dim]Owner/repo:[/dim] {owner}/{repo}")
+        console.print(f"[dim]Date range:[/dim] {since_iso[:10]} → {until_iso[:10]}")
+        console.print(f"[dim]Output dir:[/dim] {outdir_path}")
+        console.print("\n[bold yellow]Collecting fresh data...[/bold yellow]")
+
+        data = collect.collect_repository_data(
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            token=token,
+            bots=bots,
+            cache_dir=str(cache_dir),
+            use_cache=not args.no_cache,
+            on_prs_progress=None,
+            on_commits_progress=None,
+            on_ado_progress=None,
+            ado_org=ado_org,
+            ado_project=ado_project,
+            ado_ready_states=ado_ready_states,
+            ado_resolved_states=ado_resolved_states,
+            ado_qa_failed_states=ado_qa_failed_states,
+            ado_disable=ado_disable,
+        )
+
+        # Create dated subfolder for reports
+        folder_name = report._fmt_folder_name(repo, until_iso)
+        report_subdir = outdir_path / folder_name
+        report_subdir.mkdir(parents=True, exist_ok=True)
+
+        raw_out = report_subdir / f"dev-skill-raw-{tag}.json"
+        with raw_out.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+        console.print(f"[dim]Wrote refreshed raw data → {raw_out}[/dim]")
+
+        console.print("\n[bold yellow]Computing metrics and scores...[/bold yellow]")
+        scores = metrics.compute_scores(
+            data=data,
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            config=cfg,
+        )
+
+        console.print("[bold magenta]Generating reports...[/bold magenta]")
+        report.generate_reports(
+            scores=scores,
+            outdir=str(outdir_path),
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            named=not getattr(args, "anonymous", False),
+            tag=tag,
+        )
+        insights.generate_insights(
+            scores=scores,
+            data=data,
+            outdir=str(outdir_path),
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            small_pr_threshold=float(((cfg.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300),
+            tag=tag,
+        )
+        _print_terminal_summary(
+            console=console,
+            scores=scores,
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            named=not getattr(args, "anonymous", False),
+        )
+        console.print(f"\n[bold green]✓ Reports regenerated in {report_subdir}[/bold green]")
+        return 0
+
+    # Handle rerun-local subcommand: reuse last raw JSON without refetching
+    if getattr(args, "command", None) == "rerun-local":
+        console = Console()
+        console.print("[bold magenta]Regenerating from existing raw data (no refetch)[/bold magenta]")
+
+        raw_path = _resolve_raw_path(getattr(args, "raw", None), args.outdir)
+        if not raw_path:
+            console.print("[red]No dev-skill-raw-*.json found.[/red]")
+            console.print("Hint: pass --raw PATH or --outdir DIR to search in.")
+            return 2
+        if not raw_path.exists():
+            console.print(f"[red]Raw file not found:[/red] {raw_path}")
+            return 2
 
         try:
             with raw_path.open("r", encoding="utf-8") as f:
@@ -420,6 +562,11 @@ def main(argv=None) -> int:
         folder_name = report._fmt_folder_name(repo, until_iso)
         report_subdir = outdir_path / folder_name
         report_subdir.mkdir(parents=True, exist_ok=True)
+
+        raw_out = report_subdir / f"dev-skill-raw-{tag}.json"
+        with raw_out.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+        console.print(f"[dim]Wrote raw data → {raw_out}[/dim]")
 
         console.print("[bold magenta]Generating reports...[/bold magenta]")
         report.generate_reports(
@@ -543,6 +690,7 @@ def main(argv=None) -> int:
         # Create tasks for PRs and commits
         pr_task = progress.add_task("[cyan]Fetching pull requests...", total=None)
         commit_task = progress.add_task("[green]Fetching commits...", total=None)
+        ado_task = progress.add_task("[yellow]Fetching ADO tickets...", total=None)
         
         # Define progress callbacks
         def on_prs_progress(status: str, count: int):
@@ -560,6 +708,18 @@ def main(argv=None) -> int:
                 progress.update(commit_task, completed=100, total=100, description=f"[green]✓ Commits fetched ({count} total)")
             elif status == "cached":
                 progress.update(commit_task, completed=100, total=100, description=f"[green]✓ Commits (cached: {count} total)")
+
+        def on_ado_progress(status: str, count: int):
+            if status == "fetching":
+                progress.update(ado_task, description=f"[yellow]Fetching ADO tickets... ({count} fetched)")
+            elif status == "complete":
+                progress.update(ado_task, completed=100, total=100, description=f"[yellow]✓ ADO tickets fetched ({count} total)")
+            elif status == "cached":
+                progress.update(ado_task, completed=100, total=100, description=f"[yellow]✓ ADO tickets (cached: {count} total)")
+            elif status == "disabled":
+                progress.update(ado_task, completed=100, total=100, description="[yellow]ADO tickets disabled")
+            elif status == "skipped":
+                progress.update(ado_task, completed=100, total=100, description="[yellow]✓ ADO tickets skipped (no references)")
         
         # Collect data with progress callbacks
         data = collect.collect_repository_data(
@@ -573,6 +733,7 @@ def main(argv=None) -> int:
             use_cache=not args.no_cache,
             on_prs_progress=on_prs_progress,
             on_commits_progress=on_commits_progress,
+            on_ado_progress=on_ado_progress,
             ado_org=ado_org,
             ado_project=ado_project,
             ado_ready_states=ado_ready_states,
@@ -638,5 +799,15 @@ def main(argv=None) -> int:
     )
     console.print(f"\n[bold green]✓ Reports written to {report_subdir}[/bold green]")
     return 0
+
+
+def rerun_entrypoint() -> None:
+    """Console script entrypoint: rerun last query with fresh data."""
+    sys.exit(main(["rerun"] + sys.argv[1:]))
+
+
+def rerun_local_entrypoint() -> None:
+    """Console script entrypoint: regenerate from local raw data only."""
+    sys.exit(main(["rerun-local"] + sys.argv[1:]))
 
 

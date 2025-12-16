@@ -184,6 +184,49 @@ def _work_items_batch(org: str, project: str, token: str, ids: List[int]) -> Lis
     return out
 
 
+def _work_item_comments(org: str, project: str, token: str, work_item_id: int) -> List[Dict[str, Any]]:
+    url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/wit/workItems/{work_item_id}/comments"
+    params = {"api-version": "7.1-preview.3"}
+    payload = _request_json("GET", url, token, params=params)
+    comments = payload.get("value", [])
+    out: List[Dict[str, Any]] = []
+    for c in comments:
+        author = c.get("revisedBy") or c.get("createdBy") or {}
+        out.append({
+            "id": c.get("id"),
+            "text": c.get("text"),
+            "createdDate": c.get("createdDate") or c.get("publishedDate") or c.get("revisedDate"),
+            "revisedDate": c.get("revisedDate"),
+            "author": {
+                "displayName": (author or {}).get("displayName"),
+                "uniqueName": (author or {}).get("uniqueName") or (author or {}).get("uniqueName"),
+                "id": (author or {}).get("id"),
+            },
+        })
+    return out
+
+
+def _work_item_updates(org: str, project: str, token: str, work_item_id: int) -> List[Dict[str, Any]]:
+    url = f"https://dev.azure.com/{quote(org, safe='')}/{quote(project, safe='')}/_apis/wit/workitems/{work_item_id}/updates"
+    params = {"api-version": "7.1-preview.3"}
+    payload = _request_json("GET", url, token, params=params)
+    updates = payload.get("value", [])
+    out: List[Dict[str, Any]] = []
+    for u in updates:
+        by = u.get("revisedBy") or {}
+        out.append({
+            "id": u.get("id"),
+            "revisedDate": u.get("revisedDate"),
+            "revisedBy": {
+                "displayName": (by or {}).get("displayName"),
+                "uniqueName": (by or {}).get("uniqueName"),
+                "id": (by or {}).get("id"),
+            },
+            "fields": u.get("fields", {}),
+        })
+    return out
+
+
 def _identity_matches(user: Dict[str, Any], candidates: Iterable[str], aliases: Dict[str, str]) -> bool:
     display = str(user.get("displayName") or "").lower()
     unique = str(user.get("uniqueName") or "").lower()
@@ -207,6 +250,7 @@ def collect_qa_data(
     token: str,
     qa_users: Iterable[str],
     bug_types: Optional[Iterable[str]] = None,
+    story_types: Optional[Iterable[str]] = None,
     aliases: Optional[Dict[str, str]] = None,
     disable_user_filter: bool = False,
     debug_users: bool = False,
@@ -214,6 +258,8 @@ def collect_qa_data(
     force_run_ids: Optional[Iterable[int]] = None,
     cache_dir: Optional[str] = None,
     use_cache: bool = True,
+    include_comments: bool = True,
+    include_updates: bool = True,
     on_runs_progress: Optional[Callable[[str, int], None]] = None,
     on_bugs_progress: Optional[Callable[[str, int], None]] = None,
 ) -> Dict[str, Any]:
@@ -225,15 +271,24 @@ def collect_qa_data(
     runs_key = f"qa_runs_{cache_key_base}"
     results_key = f"qa_results_{cache_key_base}"
     bugs_key = f"qa_bugs_{cache_key_base}"
+    stories_key = f"qa_stories_{cache_key_base}"
+    comments_key = f"qa_comments_{cache_key_base}"
+    updates_key = f"qa_updates_{cache_key_base}"
 
     if use_cache and cache:
         cached_runs = _cache_get(cache, runs_key)
         cached_results = _cache_get(cache, results_key)
         cached_bugs = _cache_get(cache, bugs_key)
+        cached_stories = _cache_get(cache, stories_key)
+        cached_comments = _cache_get(cache, comments_key)
+        cached_updates = _cache_get(cache, updates_key)
     else:
         cached_runs = None
         cached_results = None
         cached_bugs = None
+        cached_stories = None
+        cached_comments = None
+        cached_updates = None
 
     project_for_api = project_id or project
     api_debug: Dict[str, Any] = {"project_attempts": []} if debug_api else {}
@@ -407,6 +462,127 @@ def collect_qa_data(
         if on_bugs_progress:
             on_bugs_progress("cached", len(bugs))
 
+    # Stories (User Stories/PBIs/Features)
+    if cached_stories is None:
+        story_ids: List[int] = []
+        stories: List[Dict[str, Any]] = []
+        types_in = list(story_types or [])
+        if types_in:
+            attempts_s: List[str] = []
+            primary_wit = project_for_api or project
+            if primary_wit:
+                attempts_s.append(primary_wit)
+            if project and project != primary_wit:
+                attempts_s.append(project)
+            last_err_st: Optional[Exception] = None
+            for idx, candidate in enumerate(attempts_s or [project]):
+                try:
+                    story_ids = _wiql_query_bugs(org, candidate, token, since_iso, until_iso, types_in)
+                    project_for_api = candidate
+                    last_err_st = None
+                    if story_ids or idx == (len(attempts_s or [project]) - 1):
+                        break
+                    continue
+                except requests.exceptions.HTTPError as e:  # type: ignore[attr-defined]
+                    status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
+                    if status in (400, 404):
+                        last_err_st = e
+                        continue
+                    raise
+                except Exception as e:
+                    last_err_st = e
+                    break
+            if last_err_st:
+                status = getattr(last_err_st, "response", None).status_code if getattr(last_err_st, "response", None) is not None else None
+                if status in (400, 404):
+                    stories = []
+                else:
+                    raise last_err_st
+            else:
+                stories = _work_items_batch(org, project_for_api, token, story_ids) if story_ids else []
+        else:
+            stories = []
+        if cache:
+            _cache_set(cache, stories_key, {"items": stories})
+    else:
+        stories = cached_stories.get("items", [])
+
+    # Comments and Updates for Bugs + Stories
+    wi_ids_for_extras: List[int] = []
+    if include_comments or include_updates:
+        wi_ids_for_extras = []
+        for b in bugs:
+            if b.get("id") is not None:
+                wi_ids_for_extras.append(int(b.get("id")))
+        for s in stories:
+            if s.get("id") is not None:
+                wi_ids_for_extras.append(int(s.get("id")))
+        # de-dup
+        wi_ids_for_extras = sorted({int(x) for x in wi_ids_for_extras})
+
+    work_item_comments: Dict[str, List[Dict[str, Any]]] = {}
+    work_item_updates: Dict[str, List[Dict[str, Any]]] = {}
+
+    if include_comments:
+        if cached_comments is not None:
+            work_item_comments = {str(k): v for k, v in (cached_comments.get("items", {}) or {}).items()}
+        else:
+            for wid in wi_ids_for_extras:
+                try:
+                    comments = _work_item_comments(org, project_for_api, token, wid)
+                except requests.exceptions.HTTPError as e:  # type: ignore[attr-defined]
+                    status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
+                    if status == 404 and project and project != project_for_api:
+                        comments = _work_item_comments(org, project, token, wid)
+                        project_for_api = project
+                    else:
+                        raise
+                # Filter to window
+                since_norm = _normalize_ado_datetime(since_iso)
+                until_norm = _normalize_ado_datetime(until_iso)
+                def within_window(d: str) -> bool:
+                    try:
+                        if not d:
+                            return False
+                        return since_norm <= _normalize_ado_datetime(d) <= until_norm
+                    except Exception:
+                        return True
+                filtered = [c for c in comments if within_window(c.get("createdDate") or c.get("revisedDate") or "")]
+                work_item_comments[str(wid)] = filtered
+                time.sleep(0.1)
+            if cache:
+                _cache_set(cache, comments_key, {"items": work_item_comments})
+
+    if include_updates:
+        if cached_updates is not None:
+            work_item_updates = {str(k): v for k, v in (cached_updates.get("items", {}) or {}).items()}
+        else:
+            for wid in wi_ids_for_extras:
+                try:
+                    updates = _work_item_updates(org, project_for_api, token, wid)
+                except requests.exceptions.HTTPError as e:  # type: ignore[attr-defined]
+                    status = getattr(e, "response", None).status_code if getattr(e, "response", None) is not None else None
+                    if status == 404 and project and project != project_for_api:
+                        updates = _work_item_updates(org, project, token, wid)
+                        project_for_api = project
+                    else:
+                        raise
+                # Filter to window
+                since_norm = _normalize_ado_datetime(since_iso)
+                until_norm = _normalize_ado_datetime(until_iso)
+                def within_window_u(d: str) -> bool:
+                    try:
+                        if not d:
+                            return False
+                        return since_norm <= _normalize_ado_datetime(d) <= until_norm
+                    except Exception:
+                        return True
+                filtered_u = [u for u in updates if within_window_u(u.get("revisedDate") or "")]
+                work_item_updates[str(wid)] = filtered_u
+                time.sleep(0.1)
+            if cache:
+                _cache_set(cache, updates_key, {"items": work_item_updates})
+
     # Filter to known QA users for results and bugs
     alias_map = {k.lower(): v for k, v in (aliases or {}).items()}
     qa_list = list(qa_users)
@@ -469,6 +645,9 @@ def collect_qa_data(
         "test_runs": runs,
         "test_results": filtered_results,
         "bugs": filtered_bugs,
+        "stories": stories,
+        "work_item_comments": work_item_comments if include_comments else {},
+        "work_item_updates": work_item_updates if include_updates else {},
         "qa_users": qa_list,
         **({"identity_debug": identity_debug} if debug_users else {}),
         **({"api_debug": api_debug} if debug_api else {}),

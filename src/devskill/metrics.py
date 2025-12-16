@@ -7,8 +7,33 @@ def _parse_iso(s: str) -> dt.datetime:
     if not s:
         # Arbitrary far past for missing dates
         return dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
-    s = s.replace("Z", "+00:00")
-    return dt.datetime.fromisoformat(s)
+
+    normalized = str(s).strip().replace("Z", "+00:00")
+    try:
+        return dt.datetime.fromisoformat(normalized)
+    except ValueError:
+        # Some ADO timestamps include fractional seconds with fewer than 6 digits,
+        # which Python's fromisoformat rejects. Normalize by padding/truncating
+        # the fractional portion to microseconds.
+        if "." in normalized:
+            main, rest = normalized.split(".", 1)
+            tz = ""
+            frac = rest
+            for sep in ("+", "-"):
+                if sep in rest:
+                    frac, tz = rest.split(sep, 1)
+                    tz = sep + tz
+                    break
+            frac_digits = "".join(ch for ch in frac if ch.isdigit())
+            if frac_digits:
+                frac_norm = frac_digits[:6].ljust(6, "0")
+                try:
+                    return dt.datetime.fromisoformat(f"{main}.{frac_norm}{tz}")
+                except ValueError:
+                    pass
+
+    # Fallback to epoch-like value if parsing still fails
+    return dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
 
 
 def _business_hours_delta(start: dt.datetime, end: dt.datetime, exclude_weekends: bool) -> float:

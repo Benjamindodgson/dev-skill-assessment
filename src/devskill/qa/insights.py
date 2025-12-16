@@ -59,15 +59,15 @@ def _improvement_tip(area: str, row: Dict[str, Any], team_medians: Dict[str, flo
     if area == "defects":
         you = float(row.get("defects.valid_ratio", 0.0))
         team = float(team_medians.get("defects.valid_ratio", 0.0))
-        return f"Raise valid bug ratio (you {you:.0%}, team {team:.0%}). Tighten repro steps and triage severity."
+        return f"Raise valid bug ratio (you {you:.0%}, team {team:.0%}). Tighten repro steps, triage severity, and reduce reopens."
     if area == "hygiene":
         you = float(row.get("hygiene.score", 0.0))
         team = float(team_medians.get("hygiene.score", 0.0))
-        return f"Improve hygiene (you {you:.0%}, team {team:.0%}). Ensure repro steps and attachments."
+        return f"Improve hygiene (you {you:.0%}, team {team:.0%}). Provide structured steps/expected vs actual and relevant attachments."
     if area == "responsiveness":
         you = float(row.get("responsiveness.close_median_h", 0.0))
         team = float(team_medians.get("responsiveness.close_median_h", 0.0))
-        return f"Reduce closure time (you {you:.1f}h, team {team:.1f}h). Nudge assignees and pre-validate."
+        return f"Speed up response (closure, first QA comment, and QA cycle time). Nudge assignees and pre-validate against AC."
     return "Focus on consistent incremental improvements."
 
 

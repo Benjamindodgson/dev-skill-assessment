@@ -7,7 +7,7 @@ Run a 90-day GitHub developer assessment against any repository and export Markd
 - Purpose: quickly understand delivery, collaboration, hygiene, and stability signals for developers and teams over a recent window (defaults to 90 days).
 - Data inputs: GitHub pull requests, reviews, and commits pulled via GitHub CLI or `GITHUB_TOKEN`, with optional aliases/exclusions/bot filters from `config.yml`.
 - Scoring: weighted pillars (delivery, collaboration, hygiene, stability) produce per-developer subscores and a team average; weights and thresholds are configurable.
-- Outputs: raw JSON, scores/insights JSON, and Markdown reports saved under `--outdir` (e.g., `dev-skill-assessment-*.md` and `dev-skill-assessment-insights-*.md`); you can regenerate reports from cached raw data with `devskill rerun`.
+- Outputs: raw JSON, scores/insights JSON, and Markdown reports saved under `--outdir` (e.g., `dev-skill-assessment-*.md` and `dev-skill-assessment-insights-*.md`); you can rerun the last query with `dev-skill-rerun` or regenerate offline from raw data with `dev-skill-rerun-local`.
 
 ## Install
 
@@ -109,25 +109,26 @@ qaskill rerun --raw reports/qa-skill-raw-ORG-PROJECT-YYYY-MM-DD.json --anonymous
 qaskill rerun --tag custom-tag
 ```
 
-### Rerun from last raw data
+### Rerun commands
 
-You can regenerate reports from the most recent saved raw JSON without calling GitHub again:
+`dev-skill-rerun` replays the most recent query window with fresh data using metadata from the latest `dev-skill-raw-*.json` (or one you pass with `--raw`):
 
 ```bash
-# Regenerate from the latest dev-skill-raw-*.json under ./reports (if present)
-devskill rerun
+# Fetch fresh GitHub/ADO data for the same owner/repo window
+dev-skill-rerun
 
-# Search within a specific directory for the latest raw JSON
-devskill rerun --outdir reports
+# Point at a specific raw file, override output tag, anonymize names
+dev-skill-rerun --raw reports/dev-skill-raw-OWNER-REPO-YYYY-MM-DD.json --tag custom-tag --anonymous
+```
 
-# Use a specific raw file
-devskill rerun --raw reports/dev-skill-raw-OWNER-REPO-YYYY-MM-DD.json
+`dev-skill-rerun-local` preserves the previous behavior: regenerate reports from existing raw JSON without calling GitHub/ADO.
 
-# Apply a config (aliases, bots, weights) and anonymize names
-devskill rerun --config config.yml --anonymous
+```bash
+# Regenerate from the latest local raw data
+dev-skill-rerun-local
 
-# Override the output tag used in filenames
-devskill rerun --tag custom-tag
+# Regenerate from a specific raw file and output directory
+dev-skill-rerun-local --raw reports/dev-skill-raw-OWNER-REPO-YYYY-MM-DD.json --outdir reports --config config.yml --anonymous
 ```
 
 ### Fork this repo (recommended)

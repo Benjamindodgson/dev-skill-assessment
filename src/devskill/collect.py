@@ -130,7 +130,10 @@ def _paginate_graphql(
                 )
             node = node[key]
         edges = node["edges"]
-        items.extend([edge["node"] for edge in edges])
+        for edge in edges:
+            items.append(edge["node"])
+            if progress_callback:
+                progress_callback("fetching", len(items))
         page_info = node["pageInfo"]
         if not page_info["hasNextPage"]:
             break
@@ -231,7 +234,10 @@ def _list_commits(
         batch = payload
         if not batch:
             break
-        commits.extend(batch)
+        for commit in batch:
+            commits.append(commit)
+            if progress_callback:
+                progress_callback("fetching", len(commits))
         page += 1
         time.sleep(0.2)
     if progress_callback:
@@ -283,6 +289,7 @@ def collect_repository_data(
     use_cache: bool = True,
     on_prs_progress: Optional[Callable[[str, int], None]] = None,
     on_commits_progress: Optional[Callable[[str, int], None]] = None,
+    on_ado_progress: Optional[Callable[[str, int], None]] = None,
     ado_org: Optional[str] = None,
     ado_project: Optional[str] = None,
     ado_ready_states: Optional[Iterable[str]] = None,
@@ -340,13 +347,18 @@ def collect_repository_data(
                 project=ado_project,
                 cache_dir=cache_dir,
                 use_cache=use_cache,
+                progress_callback=on_ado_progress,
             )
+        elif on_ado_progress:
+            on_ado_progress("skipped", 0)
         # attach bug ids to PRs for downstream metrics
         bug_lookup = {pid: bids for pid, bids in pr_bug_map.items()}
         for pr in prs:
             num = pr.get("number")
             if num is not None and int(num) in bug_lookup:
                 pr["bug_ids"] = bug_lookup[int(num)]
+    elif on_ado_progress:
+        on_ado_progress("disabled", 0)
 
     return {
         "owner": owner,

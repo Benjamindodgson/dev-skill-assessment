@@ -304,6 +304,10 @@ def main(argv=None) -> int:
         default_users = [x.strip() for x in args.qa_users.split(",") if x.strip()]
     qa_users = _prompt_qa_users(default_users)
     bug_types = qa_cfg.get("bug_types") or ["Bug", "Defect"]
+    story_types = qa_cfg.get("story_types") or ["Product Backlog Item", "Bug", "Feature"]
+    qa_states = qa_cfg.get("qa_states") or ["QA Failed", "Ready for Test", "Ready for QA Build", "In Test"]
+    include_comments = bool(qa_cfg.get("include_comments", True))
+    include_updates = bool(qa_cfg.get("include_updates", True))
     alias_map = qa_cfg.get("aliases") or {}
 
     # Ensure cache/out dirs
@@ -354,6 +358,7 @@ def main(argv=None) -> int:
             token=token,
             qa_users=qa_users,
             bug_types=bug_types,
+            story_types=story_types,
             aliases=alias_map,
             disable_user_filter=getattr(args, "no_user_filter", False),
             debug_users=getattr(args, "debug_users", False),
@@ -361,6 +366,8 @@ def main(argv=None) -> int:
             force_run_ids=getattr(args, "run_id", None),
             cache_dir=str(cache_dir),
             use_cache=not args.no_cache,
+            include_comments=include_comments,
+            include_updates=include_updates,
             on_runs_progress=on_runs_progress,
             on_bugs_progress=on_bugs_progress,
         )

@@ -23,6 +23,8 @@ Repository = "https://github.com/Benjamindodgson/dev-skill-assessment"
 [project.scripts]
 devskill = "devskill.cli:main"
 qaskill = "devskill.qa.cli:main"
+dev-skill-rerun = "devskill.cli:rerun_entrypoint"
+dev-skill-rerun-local = "devskill.cli:rerun_local_entrypoint"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

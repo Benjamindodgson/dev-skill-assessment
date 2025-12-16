@@ -1,6 +1,6 @@
 import datetime as dt
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List, Optional
 
 
 def _parse_iso(s: str) -> dt.datetime:
@@ -72,6 +72,15 @@ def compute_scores(
         "bug_has_repro": 0,
         "bug_has_attachments": 0,
         "bug_total": 0,
+        # Extended metrics
+        "qa_comment_response_hours": [],
+        "qa_time_hours": [],
+        "qa_items_touched": 0,
+        "reopen_count": 0,
+        "items_with_parent": 0,
+        "items_total_authored": 0,
+        "hygiene_structured": 0,
+        "hygiene_structured_total": 0,
     })
 
     # Aggregate test results by tester
@@ -131,7 +140,158 @@ def compute_scores(
             weight = 1.0
         per_user[creator]["bug_severity_weights"].append(weight)
 
-    # Build rows
+    # --- Extended signals from comments/updates/stories ---
+    qa_states = {str(s).lower() for s in (config.get("qa_states") or [])}
+    comments_by_wi: Dict[str, List[Dict[str, Any]]] = data.get("work_item_comments", {}) or {}
+    updates_by_wi: Dict[str, List[Dict[str, Any]]] = data.get("work_item_updates", {}) or {}
+    stories: List[Dict[str, Any]] = data.get("stories", []) or []
+    qa_users_list: List[str] = data.get("qa_users", []) or []
+    qa_set_lower = {str(x).lower() for x in qa_users_list}
+
+    def to_canonical_from_identity(u: Dict[str, Any]) -> str:
+        return canonical(u.get("uniqueName") or u.get("displayName") or u.get("id") or "")
+
+    def is_qa_identity(u: Dict[str, Any]) -> bool:
+        who = to_canonical_from_identity(u)
+        return who.lower() in qa_set_lower
+
+    def parse_state_spans(updates: List[Dict[str, Any]]) -> List[tuple]:
+        # returns list of (enter_dt, exit_dt, state_lower)
+        events = []
+        for u in updates:
+            rd = u.get("revisedDate") or ""
+            try:
+                when = _parse_iso(rd)
+            except Exception:
+                continue
+            fields = u.get("fields", {}) or {}
+            st = fields.get("System.State") or {}
+            if "newValue" in st or "oldValue" in st:
+                old_v = str(st.get("oldValue") or "").lower()
+                new_v = str(st.get("newValue") or "").lower()
+                events.append((when, old_v, new_v))
+        events.sort(key=lambda x: x[0])
+        spans: List[tuple] = []
+        current_in: Optional[dt.datetime] = None
+        for when, old_v, new_v in events:
+            # enter QA
+            if new_v in qa_states and (old_v not in qa_states):
+                if current_in is None:
+                    current_in = when
+            # exit QA
+            if old_v in qa_states and (new_v not in qa_states):
+                if current_in is not None:
+                    spans.append((current_in, when, old_v))
+                    current_in = None
+        # do not keep open span to now; our updates are window-bound, so ignore trailing
+        return spans
+
+    def first_enter_time(updates: List[Dict[str, Any]]) -> Optional[dt.datetime]:
+        for u in sorted(updates, key=lambda x: _parse_iso(x.get("revisedDate") or "1970-01-01T00:00:00Z")):
+            st = (u.get("fields", {}) or {}).get("System.State") or {}
+            new_v = str(st.get("newValue") or "").lower()
+            old_v = str(st.get("oldValue") or "").lower()
+            if new_v in qa_states and (old_v not in qa_states):
+                try:
+                    return _parse_iso(u.get("revisedDate") or "")
+                except Exception:
+                    return None
+        return None
+
+    def has_structured_text(text: str) -> bool:
+        if not text:
+            return False
+        t = text.lower()
+        # simplistic heuristics: mentions steps and expected/actual
+        has_steps = ("steps" in t) or ("step" in t) or ("1." in t and "2." in t)
+        has_expect = ("expected" in t)
+        has_actual = ("actual" in t)
+        return has_steps and (has_expect or has_actual)
+
+    # Evaluate items (bugs + stories)
+    def process_item(item: Dict[str, Any]) -> None:
+        fields = item.get("fields", {})
+        wi_id = str(item.get("id") or "")
+        created_by = fields.get("System.CreatedBy") or {}
+        creator = to_canonical_from_identity(created_by)
+        if creator.lower() not in excluded:
+            # Parent association for authored items
+            per_user[creator]["items_total_authored"] += 1
+            relations = item.get("relations") or []
+            if any("hierarchy" in str((rel.get("rel") or "")).lower() and "reverse" in str((rel.get("rel") or "")).lower() for rel in relations) or any("parent" in str((rel.get("rel") or "")).lower() for rel in relations):
+                per_user[creator]["items_with_parent"] += 1
+            # Structured hygiene in description/repro or author's comments
+            desc = str(fields.get("Microsoft.VSTS.TCM.ReproSteps") or fields.get("System.Description") or "")
+            structured = has_structured_text(desc)
+            # Author comments
+            for c in (comments_by_wi.get(wi_id) or []):
+                author = c.get("author") or {}
+                if to_canonical_from_identity(author) == creator and has_structured_text(str(c.get("text") or "")):
+                    structured = True
+                    break
+            per_user[creator]["hygiene_structured_total"] += 1
+            if structured:
+                per_user[creator]["hygiene_structured"] += 1
+
+        # QA commenters involvement
+        qa_commenters = set()
+        for c in (comments_by_wi.get(wi_id) or []):
+            author = c.get("author") or {}
+            if is_qa_identity(author):
+                qa_commenters.add(to_canonical_from_identity(author))
+
+        # Time spans in QA states
+        spans = parse_state_spans(updates_by_wi.get(wi_id) or [])
+        total_qa_h = 0.0
+        for ent, ext, _ in spans:
+            total_qa_h += max(0.0, (ext - ent).total_seconds() / 3600.0)
+
+        # First enter time
+        ent_time = first_enter_time(updates_by_wi.get(wi_id) or [])
+
+        # Response times per QA commenter
+        for qc in qa_commenters:
+            per_user[qc]["qa_items_touched"] += 1
+            if total_qa_h > 0:
+                per_user[qc]["qa_time_hours"].append(total_qa_h)
+            # comment delta to first enter
+            if ent_time is not None:
+                # find earliest comment time by this QA commenter
+                times = []
+                for c in (comments_by_wi.get(wi_id) or []):
+                    a = c.get("author") or {}
+                    if to_canonical_from_identity(a) == qc:
+                        try:
+                            times.append(_parse_iso(c.get("createdDate") or c.get("revisedDate") or ""))
+                        except Exception:
+                            continue
+                if times:
+                    first_c = min(times)
+                    delta_h = max(0.0, (first_c - ent_time).total_seconds() / 3600.0)
+                    per_user[qc]["qa_comment_response_hours"].append(delta_h)
+
+        # Reopen/bounce count: number of times re-entered QA after leaving it
+        reentries = 0
+        # count number of entries
+        entries = 0
+        for u in sorted(updates_by_wi.get(wi_id) or [], key=lambda x: _parse_iso(x.get("revisedDate") or "1970-01-01T00:00:00Z")):
+            st = (u.get("fields", {}) or {}).get("System.State") or {}
+            old_v = str(st.get("oldValue") or "").lower()
+            new_v = str(st.get("newValue") or "").lower()
+            if new_v in qa_states and (old_v not in qa_states):
+                entries += 1
+        if entries > 1:
+            reentries = entries - 1
+            for qc in qa_commenters:
+                per_user[qc]["reopen_count"] += reentries
+
+    # Process bugs and stories
+    for b in bugs:
+        process_item(b)
+    for s in stories:
+        process_item(s)
+
+    # Now build rows
     rows: List[Dict[str, Any]] = []
     for user, agg in per_user.items():
         if user.lower() in excluded:
@@ -143,7 +303,14 @@ def compute_scores(
         close_median_h = _median(agg["bug_close_hours"]) if agg["bug_close_hours"] else 0.0
         hygiene_repro = (agg["bug_has_repro"] / max(1, agg["bug_total"])) if agg["bug_total"] else 0.0
         hygiene_attach = (agg["bug_has_attachments"] / max(1, agg["bug_total"])) if agg["bug_total"] else 0.0
-        hygiene_score_proxy = 0.6 * hygiene_repro + 0.4 * hygiene_attach
+        hygiene_base = 0.6 * hygiene_repro + 0.4 * hygiene_attach
+        structured_ratio = (agg["hygiene_structured"] / max(1, agg["hygiene_structured_total"])) if agg["hygiene_structured_total"] else 0.0
+        parent_assoc_ratio = (agg["items_with_parent"] / max(1, agg["items_total_authored"])) if agg["items_total_authored"] else 0.0
+        hygiene_score_proxy = 0.5 * hygiene_base + 0.3 * structured_ratio + 0.2 * parent_assoc_ratio
+
+        qa_comment_median_h = _median(agg["qa_comment_response_hours"]) if agg["qa_comment_response_hours"] else 0.0
+        qa_time_median_h = _median(agg["qa_time_hours"]) if agg["qa_time_hours"] else 0.0
+        reopen_rate = (float(agg["reopen_count"]) / max(1, float(agg["qa_items_touched"]))) if agg["qa_items_touched"] else 0.0
 
         rows.append({
             "person": user,
@@ -152,8 +319,13 @@ def compute_scores(
             "defects.created": float(agg["bug_created"]),
             "defects.valid_ratio": float(valid_bug_ratio),
             "defects.severity_avg": float(sev_avg),
+            "defects.reopen_rate": float(reopen_rate),
             "hygiene.score": float(hygiene_score_proxy),
+            "hygiene.structured_ratio": float(structured_ratio),
+            "hygiene.parent_assoc_ratio": float(parent_assoc_ratio),
             "responsiveness.close_median_h": float(close_median_h),
+            "responsiveness.qa_comment_median_h": float(qa_comment_median_h),
+            "responsiveness.qa_time_median_h": float(qa_time_median_h),
         })
 
     if not rows:
@@ -170,18 +342,21 @@ def compute_scores(
     t2 = norm_field("testing.pass_rate", True)
     testing = [0.5 * a + 0.5 * b for a, b in zip(t1, t2)]
 
-    # Defects: created (higher is ambiguous; we treat moderate as neutral by inverting severity only). We'll reward closure ratio and higher severity average (as proxy for finding impactful bugs)
+    # Defects: valid ratio (higher better), severity (higher better), reopen rate (lower better)
     d1 = norm_field("defects.valid_ratio", True)
     d2 = norm_field("defects.severity_avg", True)
-    defects = [0.7 * a + 0.3 * b for a, b in zip(d1, d2)]
+    d3 = norm_field("defects.reopen_rate", False)
+    defects = [0.6 * a + 0.3 * b + 0.1 * c for a, b, c in zip(d1, d2, d3)]
 
     # Hygiene: hygiene.score (higher better)
     h1 = norm_field("hygiene.score", True)
     hygiene = h1
 
-    # Responsiveness: close_median_h (lower is better)
+    # Responsiveness: close time (lower better), time to first QA comment (lower better), time-in-QA (lower better)
     r1 = norm_field("responsiveness.close_median_h", False)
-    responsiveness = r1
+    r2 = norm_field("responsiveness.qa_comment_median_h", False)
+    r3 = norm_field("responsiveness.qa_time_median_h", False)
+    responsiveness = [0.5 * a + 0.25 * b + 0.25 * c for a, b, c in zip(r1, r2, r3)]
 
     weights = config.get("weights", {"testing": 0.30, "defects": 0.30, "hygiene": 0.20, "responsiveness": 0.20})
     w_t = float(weights.get("testing", 0.30))
