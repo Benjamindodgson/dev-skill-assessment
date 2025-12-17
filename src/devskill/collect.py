@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import os
+import sys
 import time
 import random
 from pathlib import Path
@@ -334,29 +335,30 @@ def collect_repository_data(
     prs = _filter_out_bots(prs, set(bots))
     commits = _filter_out_bots(commits, set(bots))
 
-    # Azure DevOps bug enrichment (optional)
-    bug_items: List[Dict[str, Any]] = []
-    pr_bug_map: Dict[int, List[int]] = {}
+    # Azure DevOps project collection (optional)
+    azure_data: Dict[str, Any] = {}
     if not ado_disable and ado_org and ado_project:
-        pr_bug_map = _extract_bug_ids_from_prs(prs)
-        all_bug_ids: List[int] = sorted({bid for arr in pr_bug_map.values() for bid in arr})
-        if all_bug_ids:
-            bug_items = ado.fetch_work_items(
-                ids=all_bug_ids,
+        try:
+            azure_data = ado.collect_project_items(
                 org=ado_org,
                 project=ado_project,
+                since_iso=since_iso,
+                until_iso=until_iso,
                 cache_dir=cache_dir,
                 use_cache=use_cache,
+                ready_states=ado_ready_states,
+                resolved_states=ado_resolved_states,
+                qa_failed_states=ado_qa_failed_states,
                 progress_callback=on_ado_progress,
             )
-        elif on_ado_progress:
-            on_ado_progress("skipped", 0)
-        # attach bug ids to PRs for downstream metrics
-        bug_lookup = {pid: bids for pid, bids in pr_bug_map.items()}
-        for pr in prs:
-            num = pr.get("number")
-            if num is not None and int(num) in bug_lookup:
-                pr["bug_ids"] = bug_lookup[int(num)]
+        except Exception as e:
+            # Fallback for ADO failures (e.g. azure-cli bugs, auth issues)
+            # We print to stderr to avoid breaking json output if used elsewhere, 
+            # though here it's inside CLI.
+            print(f"\n[Warning] ADO collection failed: {e}", file=sys.stderr)
+            if on_ado_progress:
+                on_ado_progress("disabled", 0)
+            azure_data = {}
     elif on_ado_progress:
         on_ado_progress("disabled", 0)
 
@@ -374,8 +376,9 @@ def collect_repository_data(
             "resolved_states": list(ado_resolved_states) if ado_resolved_states else [],
             "qa_failed_states": list(ado_qa_failed_states) if ado_qa_failed_states else [],
         },
-        "ado_bug_items": bug_items,
-        "ado_pr_bugs": pr_bug_map,
+        "ado_bug_items": [],
+        "ado_pr_bugs": {},
+        "azure": azure_data,
     }
 
 

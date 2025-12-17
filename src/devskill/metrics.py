@@ -106,24 +106,6 @@ def compute_scores(
 
     prs = data.get("pull_requests", [])
     commits = data.get("commits", [])
-    ado_bug_items = data.get("ado_bug_items", []) or []
-    ado_pr_bugs = data.get("ado_pr_bugs", {}) or {}
-    ado_cfg = config.get("ado") or {}
-    ready_states = {
-        str(s).lower()
-        for s in (
-            ado_cfg.get("ready_states")
-            or ["Ready for Dev"]
-        )
-    }
-    resolved_states = {
-        str(s).lower()
-        for s in (
-            ado_cfg.get("resolved_states")
-            or ["Resolved", "Closed", "Done", "Removed", "Cannot Reproduce"]
-        )
-    }
-    qa_failed_states = {str(s).lower() for s in (ado_cfg.get("qa_failed_states") or ["QA Failed"])}
 
     per_dev = defaultdict(lambda: {
         "merged_prs": 0,
@@ -139,10 +121,6 @@ def compute_scores(
         "reopened_prs": 0,
         "post_merge_fix_within_48h": 0,
         "commits": 0,
-        "bug_qa_failed": 0,
-        "bug_qa_failed_entries": 0,
-        "bug_resolution_hours": [],
-        "bug_resolution_count": 0,
     })
 
     # Index commits by author login or email
@@ -191,109 +169,6 @@ def compute_scores(
         for rv in (pr.get("reviews") or {}).get("nodes", []):
             if rv.get("state") == "CHANGES_REQUESTED":
                 per_dev[author]["change_requests"] += 1
-
-    # Map bug data from Azure DevOps to PR authors (if present)
-    bug_by_id = {}
-    for b in ado_bug_items:
-        try:
-            bid = int(b.get("id"))
-            bug_by_id[bid] = b
-        except Exception:
-            continue
-
-    def analyze_bug(bug: Dict[str, Any]) -> tuple:
-        fields = bug.get("fields", {}) or {}
-        initial_state = str(fields.get("System.State") or "").lower()
-        created_date = _parse_iso(fields.get("System.CreatedDate") or "")
-        qa_failed_entries = 1 if initial_state in qa_failed_states else 0
-        ready_enter: Optional[dt.datetime] = created_date if initial_state in ready_states else None
-        resolved_at: Optional[dt.datetime] = created_date if initial_state in resolved_states else None
-
-        events = []
-        for u in bug.get("updates", []) or []:
-            try:
-                when = _parse_iso(u.get("revisedDate") or (u.get("fields", {}).get("System.ChangedDate", {}) or {}).get("newValue") or "")
-            except Exception:
-                continue
-            change_fields = (u.get("fields") or {})
-
-            # Capture transitions from both System.State and board columns, since ADO
-            # often records Ready/Done movement via Kanban columns instead of state.
-            candidate_changes = []
-            state_change = change_fields.get("System.State") or {}
-            if state_change:
-                candidate_changes.append(state_change)
-            for fname, change in change_fields.items():
-                if fname == "System.BoardColumn" or fname.lower().endswith("kanban.column"):
-                    candidate_changes.append(change or {})
-
-            for change in candidate_changes:
-                try:
-                    new_state = str(change.get("newValue") or "").lower()
-                    old_state = str(change.get("oldValue") or "").lower()
-                except AttributeError:
-                    continue
-                if new_state or old_state:
-                    events.append((when, old_state, new_state))
-
-        events.sort(key=lambda x: x[0])
-        resolved_state_value: Optional[str] = None
-        for when, old_state, new_state in events:
-            if new_state in qa_failed_states and old_state not in qa_failed_states:
-                qa_failed_entries += 1
-            if new_state in ready_states and ready_enter is None:
-                ready_enter = when
-            if new_state in resolved_states and ready_enter is not None:
-                # Prefer the first transition into Done; otherwise fall back to the earliest resolved state.
-                if resolved_at is None or (new_state == "done" and resolved_state_value != "done"):
-                    resolved_at = when
-                    resolved_state_value = new_state
-
-        # Fallback: if updates are missing but the current state is resolved (e.g., Done),
-        # use the state change date as the resolution timestamp.
-        if resolved_at is None and ready_enter is not None:
-            current_state = initial_state
-            if current_state in resolved_states:
-                fallback_ts = (
-                    fields.get("Microsoft.VSTS.Common.ResolvedDate")
-                    or fields.get("Microsoft.VSTS.Common.ClosedDate")
-                    or fields.get("Microsoft.VSTS.Common.StateChangeDate")
-                )
-                parsed_fallback = _parse_iso(fallback_ts or "")
-                if parsed_fallback.year > 1970:
-                    resolved_at = parsed_fallback
-        # If we have a resolution but never observed a ready transition, treat creation as the ready start.
-        if resolved_at is not None and ready_enter is None:
-            ready_enter = created_date
-        resolution_hours: Optional[float] = None
-        if ready_enter and resolved_at and resolved_at >= ready_enter:
-            resolution_hours = (resolved_at - ready_enter).total_seconds() / 3600.0
-        return qa_failed_entries, resolution_hours
-
-    if bug_by_id:
-        seen_by_dev: Dict[str, set] = defaultdict(set)
-        for pr in prs:
-            author = canonical((pr.get("author") or {}).get("login", ""))
-            bug_ids = pr.get("bug_ids") or ado_pr_bugs.get(pr.get("number")) or []
-            for bid in bug_ids:
-                try:
-                    bid_int = int(bid)
-                except Exception:
-                    continue
-                if bid_int in seen_by_dev[author]:
-                    continue
-                seen_by_dev[author].add(bid_int)
-                bug = bug_by_id.get(bid_int)
-                if not bug:
-                    continue
-                qa_failed_entries, res_hours = analyze_bug(bug)
-                if qa_failed_entries > 0:
-                    per_dev[author]["bug_qa_failed_entries"] += qa_failed_entries
-                    # retain a binary counter for backward compatibility
-                    per_dev[author]["bug_qa_failed"] += 1
-                if res_hours is not None:
-                    per_dev[author]["bug_resolution_hours"].append(res_hours)
-                    per_dev[author]["bug_resolution_count"] += 1
 
     # Derive metrics
     weights = config.get("weights", {"delivery": 0.30, "collaboration": 0.25, "hygiene": 0.15, "stability": 0.30})
@@ -345,9 +220,6 @@ def compute_scores(
         change_requests = agg["change_requests"]
         reopened = agg["reopened_prs"]
         fix48 = agg["post_merge_fix_within_48h"]
-        qa_failed_entries = agg.get("bug_qa_failed_entries", agg.get("bug_qa_failed", 0))
-        bug_resolved = agg["bug_resolution_count"]
-        bug_res_median = _median(agg["bug_resolution_hours"]) if agg["bug_resolution_hours"] else 0.0
 
         dev_rows.append({
             "developer": dev,
@@ -364,9 +236,6 @@ def compute_scores(
             "stability.change_requests": float(change_requests),
             "stability.reopened_prs": float(reopened),
             "stability.fix48": float(fix48),
-            "stability.bug_qa_failed_entries": float(qa_failed_entries),
-            "stability.bug_resolution_median_h": float(bug_res_median),
-            "stability.bug_resolution_count": float(bug_resolved),
             "activity.commits": float(agg["commits"]),
         })
 
@@ -402,11 +271,9 @@ def compute_scores(
     s1 = norm_field(dev_rows, "stability.change_requests", False)
     s2 = norm_field(dev_rows, "stability.reopened_prs", False)
     s3 = norm_field(dev_rows, "stability.fix48", True)
-    s4 = norm_field(dev_rows, "stability.bug_qa_failed_entries", False)
-    s5 = norm_field(dev_rows, "stability.bug_resolution_median_h", False)
     stability = [
-        0.25 * a + 0.2 * b + 0.15 * c + 0.2 * d + 0.2 * e
-        for a, b, c, d, e in zip(s1, s2, s3, s4, s5)
+        0.4 * a + 0.35 * b + 0.25 * c
+        for a, b, c in zip(s1, s2, s3)
     ]
 
     w_del = float(weights.get("delivery", 0.30))
@@ -443,6 +310,7 @@ def compute_scores(
             "until": until_iso,
             "score": team_score,
             "count": len(scores),
+            "repos": data.get("repos", []),
         },
     }
 

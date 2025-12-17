@@ -53,6 +53,18 @@ ado:
   resolved_states: ["Resolved", "Closed", "Done"]
   qa_failed_states: ["QA Failed"]
 
+# Azure assessment configuration
+azure:
+  weights:
+    resolution: 0.25
+    predictability: 0.25
+    velocity: 0.25
+    quality: 0.25
+  effort_field: Microsoft.VSTS.Scheduling.StoryPoints
+  ready_states: ["Ready for Dev"]
+  resolved_states: ["Resolved", "Closed", "Done"]
+  qa_failed_states: ["QA Failed"]
+
 # QA assessment configuration (Azure DevOps)
 qa:
   users: [samina.wasey@ecolab.com,simran.rijal@ecolab.com,nishitha.voleti@ecolab.com,raja.kattoju@ecolab.com,christian.gomez@ecolab.com]

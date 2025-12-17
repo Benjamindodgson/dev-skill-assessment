@@ -52,7 +52,7 @@ def _strength_example(area: str, dev_login: str, data: Dict[str, Any], small_pr_
                 best = pr
         if best is not None and best_hours is not None:
             size = (best.get("additions", 0) or 0) + (best.get("deletions", 0) or 0)
-            return f"{_github_pr_link(owner, repo, best.get('number'))} merged in {_fmt_duration_hm(best_hours)} (±{int(size)} lines)."
+            return f"{_github_pr_link_ctx(best, owner, repo)} merged in {_fmt_duration_hm(best_hours)} (±{int(size)} lines)."
         return "Merged PR with quick turnaround."
 
     # Collaboration: earliest review on others' PRs
@@ -75,7 +75,7 @@ def _strength_example(area: str, dev_login: str, data: Dict[str, Any], small_pr_
                     best = pr
         if best is not None and best_delta is not None:
             author = (best.get("author") or {}).get("login", "")
-            return f"Reviewed {_github_pr_link(owner, repo, best.get('number'))} from {_github_user_link(author)} within {_fmt_duration_hm(best_delta)} of creation."
+            return f"Reviewed {_github_pr_link_ctx(best, owner, repo)} from {_github_user_link(author)} within {_fmt_duration_hm(best_delta)} of creation."
         return "Provided timely peer review."
 
     # Hygiene: small PR example
@@ -90,7 +90,7 @@ def _strength_example(area: str, dev_login: str, data: Dict[str, Any], small_pr_
                 best_size = size
                 best = pr
         if best is not None and best_size is not None:
-            return f"{_github_pr_link(owner, repo, best.get('number'))} was a focused change (±{int(best_size)} lines)."
+            return f"{_github_pr_link_ctx(best, owner, repo)} was a focused change (±{int(best_size)} lines)."
         return "Submitted focused, reviewable PRs."
 
     # Stability: PR merged without change requests (proxy for initial quality)
@@ -102,7 +102,7 @@ def _strength_example(area: str, dev_login: str, data: Dict[str, Any], small_pr_
                 continue
             reviews = (pr.get("reviews") or {}).get("nodes", [])
             if not any(rv.get("state") == "CHANGES_REQUESTED" for rv in reviews):
-                return f"{_github_pr_link(owner, repo, pr.get('number'))} merged with 0 change requests."
+                return f"{_github_pr_link_ctx(pr, owner, repo)} merged with 0 change requests."
         return "PRs merged with minimal rework."
 
     return "Consistent performance."
@@ -155,6 +155,19 @@ def _github_user_link(username: str) -> str:
     return f"[@{username}](https://github.com/{username})"
 
 
+def _pr_repo_context(pr: Dict[str, Any], default_owner: str, default_repo: str) -> Tuple[str, str]:
+    """Return owner/repo for a PR, falling back to defaults for aggregated runs."""
+    return (
+        pr.get("owner") or pr.get("repo_owner") or default_owner,
+        pr.get("repo") or pr.get("repository") or default_repo,
+    )
+
+
+def _github_pr_link_ctx(pr: Dict[str, Any], default_owner: str, default_repo: str) -> str:
+    owner, repo = _pr_repo_context(pr, default_owner, default_repo)
+    return _github_pr_link(owner, repo, pr.get("number"))
+
+
 def _improvement_tip(area: str, dev_row: Dict[str, Any], team_medians: Dict[str, float], small_pr_threshold: float) -> str:
     if area == "delivery":
         lead_h = float(dev_row.get("delivery.lead_time_median_h", 0.0))
@@ -192,7 +205,7 @@ def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr
             merged.append((hours, pr))
         for hours, pr in sorted(merged, key=lambda t: t[0])[:3]:
             size = (pr.get("additions", 0) or 0) + (pr.get("deletions", 0) or 0)
-            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} merged in {_fmt_duration_hm(hours)} (±{int(size)} lines).")
+            examples.append(f"{_github_pr_link_ctx(pr, owner, repo)} merged in {_fmt_duration_hm(hours)} (±{int(size)} lines).")
         return examples
 
     if area == "collaboration":
@@ -210,7 +223,7 @@ def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr
                     reviews.append((delta, pr))
         for delta, pr in sorted(reviews, key=lambda t: t[0])[:3]:
             author = (pr.get("author") or {}).get("login", "")
-            examples.append(f"Reviewed {_github_pr_link(owner, repo, pr.get('number'))} from {_github_user_link(author)} within {_fmt_duration_hm(delta)}.")
+            examples.append(f"Reviewed {_github_pr_link_ctx(pr, owner, repo)} from {_github_user_link(author)} within {_fmt_duration_hm(delta)}.")
         if not examples:
             examples.append("No recorded reviews in window; collaboration visible via other channels may not be captured.")
         return examples
@@ -223,7 +236,7 @@ def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr
             size = float((pr.get("additions", 0) or 0) + (pr.get("deletions", 0) or 0))
             sizes.append((size, pr))
         for size, pr in sorted(sizes, key=lambda t: t[0])[:3]:
-            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} was focused (±{int(size)} lines).")
+            examples.append(f"{_github_pr_link_ctx(pr, owner, repo)} was focused (±{int(size)} lines).")
         return examples
 
     if area == "stability":
@@ -237,7 +250,7 @@ def _strength_examples(area: str, dev_login: str, data: Dict[str, Any], small_pr
             if not any(rv.get("state") == "CHANGES_REQUESTED" for rv in reviews):
                 zero_cr.append(pr)
         for pr in zero_cr[:3]:
-            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} merged with 0 change requests.")
+            examples.append(f"{_github_pr_link_ctx(pr, owner, repo)} merged with 0 change requests.")
         if not examples:
             examples.append("Merged PRs generally required minimal rework.")
         return examples
@@ -262,7 +275,7 @@ def _improvement_examples(area: str, dev_login: str, data: Dict[str, Any], small
             merged.append((hours, pr))
         for hours, pr in sorted(merged, key=lambda t: t[0], reverse=True)[:3]:
             size = (pr.get("additions", 0) or 0) + (pr.get("deletions", 0) or 0)
-            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} took {_fmt_duration_hm(hours)} to merge (±{int(size)} lines). Consider breaking into smaller parts.")
+            examples.append(f"{_github_pr_link_ctx(pr, owner, repo)} took {_fmt_duration_hm(hours)} to merge (±{int(size)} lines). Consider breaking into smaller parts.")
         if not examples:
             examples.append("No merged PRs to analyze; consider smaller, more frequent PRs to improve delivery cadence.")
         return examples
@@ -282,7 +295,7 @@ def _improvement_examples(area: str, dev_login: str, data: Dict[str, Any], small
                     reviews.append((delta, pr))
         for delta, pr in sorted(reviews, key=lambda t: t[0], reverse=True)[:3]:
             author = (pr.get("author") or {}).get("login", "")
-            examples.append(f"Reviewed {_github_pr_link(owner, repo, pr.get('number'))} from {_github_user_link(author)} after {_fmt_duration_hm(delta)}; aim for <24h.")
+            examples.append(f"Reviewed {_github_pr_link_ctx(pr, owner, repo)} from {_github_user_link(author)} after {_fmt_duration_hm(delta)}; aim for <24h.")
         if not examples:
             examples.append("No recorded peer reviews; start by reviewing 1–2 teammate PRs daily.")
             examples.append("Enable notifications for review requests to improve responsiveness.")
@@ -297,7 +310,7 @@ def _improvement_examples(area: str, dev_login: str, data: Dict[str, Any], small
             size = float((pr.get("additions", 0) or 0) + (pr.get("deletions", 0) or 0))
             sizes.append((size, pr))
         for size, pr in sorted(sizes, key=lambda t: t[0], reverse=True)[:3]:
-            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} was large (±{int(size)} lines). Split along feature boundaries.")
+            examples.append(f"{_github_pr_link_ctx(pr, owner, repo)} was large (±{int(size)} lines). Split along feature boundaries.")
         if not examples:
             examples.append("No authored PRs; create smaller, focused PRs to improve reviewability.")
         return examples
@@ -311,7 +324,7 @@ def _improvement_examples(area: str, dev_login: str, data: Dict[str, Any], small
             if any(rv.get("state") == "CHANGES_REQUESTED" for rv in reviews):
                 with_cr.append(pr)
         for pr in with_cr[:3]:
-            examples.append(f"{_github_pr_link(owner, repo, pr.get('number'))} received change requests; add pre-review checks and tests.")
+            examples.append(f"{_github_pr_link_ctx(pr, owner, repo)} received change requests; add pre-review checks and tests.")
         if not examples:
             examples.append("No change-requested PRs found; ensure tests and checklists to maintain quality.")
         return examples
@@ -342,6 +355,7 @@ def generate_insights(
     until_iso: str,
     small_pr_threshold: float = 300.0,
     tag: Optional[str] = None,
+    repos: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     out = Path(outdir)
     _ensure_dir(out)
@@ -363,27 +377,14 @@ def generate_insights(
 
     lines: List[str] = []
     lines.append("# 90-Day Assessment: Strengths & Improvements")
-    lines.append(f"Repository: {_github_repo_link(owner, repo)}  ")
+    if repos:
+        repo_list = ", ".join(f"{r.get('owner')}/{r.get('repo')}" for r in repos if r.get("owner") and r.get("repo"))
+        repo_display = repo_list or f"{owner}/{repo}"
+        lines.append(f"Repositories: {repo_display}  ")
+    else:
+        lines.append(f"Repository: {_github_repo_link(owner, repo)}  ")
     lines.append(f"Window: { _fmt_pretty_date(since_iso) } → { _fmt_pretty_date(until_iso) }")
     lines.append("")
-
-    has_bug_signals = any(
-        float(d.get("stability.bug_qa_failed_entries", 0) or 0) > 0
-        or float(d.get("stability.bug_resolution_count", 0) or 0) > 0
-        for d in devs
-    )
-    if has_bug_signals:
-        lines.append("## Azure DevOps bug signals")
-        lines.append("")
-        lines.append("| Developer | QA Failed entries | Ready→Resolved median (h) | Resolved bugs |")
-        lines.append("|---|---:|---:|---:|")
-        for d in devs:
-            name = d.get("developer", "unknown")
-            qa_failed_entries = float(d.get("stability.bug_qa_failed_entries", 0) or 0)
-            bug_median = float(d.get("stability.bug_resolution_median_h", 0) or 0)
-            bug_resolved = float(d.get("stability.bug_resolution_count", 0) or 0)
-            lines.append(f"| {name} | {qa_failed_entries:.0f} | {bug_median:.1f} | {bug_resolved:.0f} |")
-        lines.append("")
 
     for d in devs:
         name = d.get("developer", "unknown")
@@ -401,13 +402,6 @@ def generate_insights(
         for ex in _improvement_examples(improvement, name, data, small_pr_threshold, owner, repo)[:3]:
             lines.append(f"  - {ex}")
         lines.append(f"  Tip: {_improvement_tip(improvement, d, team_meds, small_pr_threshold)}")
-        qa_failed_entries = float(d.get("stability.bug_qa_failed_entries", 0) or 0)
-        bug_resolved = float(d.get("stability.bug_resolution_count", 0) or 0)
-        bug_median = float(d.get("stability.bug_resolution_median_h", 0) or 0)
-        if qa_failed_entries > 0 or bug_resolved > 0:
-            lines.append(
-                f"- Bug signals: QA Failed entries {qa_failed_entries:.0f} (counts re-entries); Ready→Resolved median {bug_median:.1f}h across {bug_resolved:.0f} linked bugs."
-            )
         lines.append("")
 
     md_path.write_text("\n".join(lines), encoding="utf-8")

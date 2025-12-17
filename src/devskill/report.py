@@ -43,6 +43,7 @@ def generate_reports(
     until_iso: str,
     named: bool = True,
     tag: Optional[str] = None,
+    repos: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     out = Path(outdir)
     _ensure_dir(out)
@@ -67,7 +68,12 @@ def generate_reports(
     team = scores.get("team", {})
     lines = []
     lines.append(f"# 90-Day GitHub Dev Assessment\n")
-    lines.append(f"Repository: {_github_repo_link(owner, repo)}  ")
+    if repos:
+        repo_list = ", ".join(f"{r.get('owner')}/{r.get('repo')}" for r in repos if r.get("owner") and r.get("repo"))
+        repo_display = repo_list or f"{owner}/{repo}"
+        lines.append(f"Repositories: {repo_display}  ")
+    else:
+        lines.append(f"Repository: {_github_repo_link(owner, repo)}  ")
     lines.append(f"Window: { _fmt_pretty_date(since_iso) } → { _fmt_pretty_date(until_iso) }  ")
     lines.append(f"Team Score: {team.get('score', 0.0)}  ")
     lines.append("")
@@ -92,28 +98,9 @@ def generate_reports(
             f"| {dev_name} | {d.get('score')} | {subs.get('delivery')} | {subs.get('collaboration')} | {subs.get('hygiene')} | {subs.get('stability')} |"
         )
     lines.append("")
-    # Azure DevOps bug quality signals table (optional)
-    has_bug_signals = any(
-        float(d.get("stability.bug_qa_failed_entries", 0) or 0) > 0
-        or float(d.get("stability.bug_resolution_count", 0) or 0) > 0
-        for d in devs
-    )
-    if has_bug_signals:
-        lines.append("## Azure DevOps bug signals")
-        lines.append("")
-        lines.append("| Developer | QA Failed entries | Ready→Resolved median (h) | Resolved bugs |")
-        lines.append("|---|---:|---:|---:|")
-        for d in devs:
-            dev_name = d.get("developer") if named else "dev-***"
-            qa_failed_entries = float(d.get("stability.bug_qa_failed_entries", 0) or 0)
-            median_h = float(d.get("stability.bug_resolution_median_h", 0) or 0)
-            resolved = float(d.get("stability.bug_resolution_count", 0) or 0)
-            lines.append(f"| {dev_name} | {qa_failed_entries:.0f} | {median_h:.1f} | {resolved:.0f} |")
-        lines.append("")
     lines.append("### Notes")
     lines.append("- Metrics are proxies; interpret alongside context.")
     lines.append("- Weekends excluded from review responsiveness metrics.")
-    lines.append("- QA Failed entries count each time a linked bug enters a QA Failed state, including re-entries.")
     lines.append("- Weights: delivery 30%, collaboration 25%, hygiene 15%, stability 30%.")
 
     md_path.write_text("\n".join(lines), encoding="utf-8")

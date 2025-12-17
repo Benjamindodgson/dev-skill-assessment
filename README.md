@@ -52,7 +52,7 @@ devskill \
 - `--outdir`: output directory (default `reports`)
 - `--config`: optional YAML for aliases/bots/weights (see `config.yml`)
 - `--no-cache`: disable local API response caching
-- Azure DevOps bug enrichment (optional):
+- Azure DevOps assessment (optional):
   - `--ado-org`: Azure DevOps org (e.g., `ecolabcommercialsolutions` or `https://dev.azure.com/ecolabcommercialsolutions`)
   - `--ado-project`: Azure DevOps project name (e.g., `Pest Commercial Solutions`)
   - `--ado-ready-states`: comma-separated Ready-for-Dev state names (default from config)
@@ -60,13 +60,12 @@ devskill \
   - `--ado-qa-failed-states`: comma-separated QA Failed state names (default from config)
   - `--ado-disable`: skip Azure DevOps enrichment even if org/project provided
 
-**Azure DevOps enrichment:** When `ado.org` and `ado.project` are configured (or passed as flags), `devskill` will parse PR titles for `AB#<id>`, fetch those work items via Azure DevOps CLI (`az boards work-item show/updates list`), and add two stability signals per author:
-- Count of linked bugs that ever entered a QA Failed state.
-- Median time from Ready for Dev to Resolved/Closed for linked bugs.
+**Azure DevOps assessment:** When `ado.org` and `ado.project` are configured (or passed as flags), `devskill` fetches all project work items (and their updates) in the window, plus iteration dates. It computes a separate Azure assessment (Resolution Time, Predictability, Velocity, Quality) with configurable weights (see `config.yml` under `azure`). These scores do **not** change DevSkill (GitHub) scores; they are shown separately in the terminal and embedded into `dev-skill-raw-*.json` alongside the raw Azure payload.
 
 Prereqs: Azure CLI with Azure DevOps extension (`az extension add --name azure-devops`) and an authenticated session (`az devops login` with PAT or `az login`). No enrichment occurs if org/project are omitted or `--ado-disable` is set.
 
 Outputs include repository and date in filenames, e.g. `dev-skill-assessment-OWNER-REPO-YYYY-MM-DD.md` and `dev-skill-assessment-insights-OWNER-REPO-YYYY-MM-DD.md`.
+`dev-skill-raw-*.json` now also embeds `devskill_scores` and (when configured) `azure_assessment` plus the raw Azure work item payload under `azure`.
 
 ### QA Assessment (Azure DevOps) — qaskill
 
