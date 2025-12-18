@@ -7,7 +7,7 @@ import time
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional, Set
 
 try:
     import yaml  # type: ignore
@@ -18,9 +18,10 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 from rich.panel import Panel
+from rich.prompt import Confirm
 from rich.box import ROUNDED
 
-from . import collect, metrics, report, insights, azure_metrics
+from . import collect, metrics, report, insights, azure_metrics, ado
 
 REPO_RE = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+)(?:\.git)?$")
  
@@ -101,6 +102,102 @@ def _merge_repo_payloads(
     return merged
 
 
+def _work_item_ids_from_repos(repos_data: List[Dict[str, Any]]) -> List[int]:
+    """Extract unique ADO work item IDs from PR titles (AB#123456)."""
+    ids: List[int] = []
+    seen: Set[int] = set()
+    for entry in repos_data:
+        prs = entry.get("pull_requests") or []
+        for bug_ids in collect._extract_bug_ids_from_prs(prs).values():
+            for bid in bug_ids:
+                if bid not in seen:
+                    seen.add(bid)
+                    ids.append(bid)
+    return ids
+
+
+def _collect_ado_after_repos(
+    console: Console,
+    *,
+    ado_disable: bool,
+    ado_org: Optional[str],
+    ado_project: Optional[str],
+    ado_ready_states: List[str],
+    ado_resolved_states: List[str],
+    ado_qa_failed_states: List[str],
+    repo_payloads: List[Dict[str, Any]],
+    since_iso: str,
+    until_iso: str,
+    cache_dir: Path,
+    use_cache: bool,
+) -> Dict[str, Any]:
+    """Collect Azure DevOps data after all repos are fetched, showing a spinner with counts."""
+    if ado_disable or not (ado_org and ado_project):
+        return {}
+
+    pr_bug_ids = _work_item_ids_from_repos(repo_payloads)
+    if not pr_bug_ids:
+        return {}
+
+    total_ids = len(pr_bug_ids)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold yellow]{task.description}"),
+        console=console,
+    ) as progress:
+        azure_task = progress.add_task("[yellow]Fetching Azure DevOps data...", total=None)
+
+        def on_ado_progress(status: str, count: int) -> None:
+            pct = ""
+            if total_ids:
+                pct_val = min(100, int((count / total_ids) * 100))
+                pct = f" {pct_val}%"
+
+            if status == "fetching-ids":
+                desc = f"[yellow]Discovering Azure work item ids... ({count}/{total_ids}{pct})"
+            elif status == "ids":
+                desc = f"[yellow]Azure work item ids discovered: {count}/{total_ids}"
+            elif status == "fetching":
+                desc = f"[yellow]Fetching Azure work items... ({count}/{total_ids}{pct})"
+            elif status == "cached":
+                desc = f"[yellow]✓ Azure work items (cached: {count}/{total_ids})"
+            elif status == "complete":
+                desc = f"[yellow]✓ Azure work items fetched ({count}/{total_ids})"
+            else:
+                desc = f"[yellow]Azure DevOps status: {status} ({count})"
+            progress.update(azure_task, description=desc)
+
+        azure_data: Dict[str, Any] = {}
+        try:
+            azure_data = ado.collect_work_items_by_ids(
+                org=ado_org,
+                project=ado_project,
+                ids=pr_bug_ids,
+                since_iso=since_iso,
+                until_iso=until_iso,
+                cache_dir=str(cache_dir),
+                use_cache=use_cache,
+                ready_states=ado_ready_states,
+                resolved_states=ado_resolved_states,
+                qa_failed_states=ado_qa_failed_states,
+                progress_callback=on_ado_progress,
+            )
+            final_count = azure_data.get("count", 0)
+            progress.update(
+                azure_task,
+                description=f"[yellow]✓ Azure work items fetched ({final_count} total)",
+            )
+        except Exception as e:
+            progress.update(azure_task, description="[red]Azure DevOps lookup failed[/red]")
+            console.print(f"\n[red]Warning: ADO collection failed: {e}[/red]")
+            azure_data = {}
+        finally:
+            progress.stop_task(azure_task)
+
+    return azure_data
+
+
 def _selected_repos_from_raw(raw: Dict[str, Any]) -> List[Tuple[str, str]]:
     """Extract selected repos from a raw payload (supports aggregated runs)."""
     repos: List[Tuple[str, str]] = []
@@ -116,6 +213,33 @@ def _selected_repos_from_raw(raw: Dict[str, Any]) -> List[Tuple[str, str]]:
     if not repos and raw.get("owner") and raw.get("repo"):
         repos.append((raw.get("owner"), raw.get("repo")))
     return repos
+
+
+def _confirm_rerun(
+    console: Console,
+    *,
+    repos: List[Tuple[str, str]],
+    since_iso: Optional[str],
+    until_iso: Optional[str],
+    use_cache: bool,
+    skip_prompt: bool = False,
+) -> bool:
+    """Print a concise summary and ask for confirmation (default: proceed)."""
+    repo_list_display = ", ".join(f"{o}/{r}" for o, r in repos if o and r) or "<unknown>"
+    since_label = (since_iso or "?")[:10]
+    until_label = (until_iso or "?")[:10]
+    cache_label = "enabled (default)" if use_cache else "disabled (--no-cache)"
+
+    console.print("\n[bold]Confirm rerun configuration[/bold]")
+    console.print(f"[dim]Repos:[/dim] {repo_list_display}")
+    console.print(f"[dim]Date range:[/dim] {since_label} → {until_label}")
+    console.print(f"[dim]Cache:[/dim] {cache_label}")
+
+    if skip_prompt:
+        console.print("[dim]Skipping confirmation (flag set).[/dim]")
+        return True
+
+    return bool(Confirm.ask("[bold yellow]Proceed?[/bold yellow]", default=True))
 
 
 def _load_config(path: Any, verbose: bool = True) -> Dict[str, Any]:
@@ -499,6 +623,27 @@ def _print_terminal_summary(
                 f"Median QA fails: {float(az_quality.get('median_qa_failed', 0.0)):.1f}",
             )
             console.print(az_table)
+            az_devs = azure_scores.get("developers") or []
+            if az_devs:
+                az_dev_table = Table(box=ROUNDED, header_style="bold magenta", show_lines=False, title="Azure developers")
+                az_dev_table.add_column("#", justify="right")
+                az_dev_table.add_column("Developer", justify="left")
+                az_dev_table.add_column("Resolution", justify="right")
+                az_dev_table.add_column("Predictability", justify="right")
+                az_dev_table.add_column("Velocity", justify="right")
+                az_dev_table.add_column("Quality", justify="right")
+
+                for idx, row in enumerate(az_devs, 1):
+                    subs = row.get("subscores", {}) or {}
+                    az_dev_table.add_row(
+                        str(idx),
+                        str(row.get("developer", "unknown")),
+                        f"{float(subs.get('resolution', 0.0)):.2f}",
+                        f"{float(subs.get('predictability', 0.0)):.2f}",
+                        f"{float(subs.get('velocity', 0.0)):.2f}",
+                        f"{float(subs.get('quality', 0.0)):.2f}",
+                    )
+                console.print(az_dev_table)
         else:
             console.print("[dim]Azure assessment unavailable (no ADO items in window).[/dim]")
 
@@ -511,6 +656,13 @@ def main(argv=None) -> int:
     rerun_p.add_argument("--raw", default=None, help="Path to dev-skill-raw-*.json (optional)")
     rerun_p.add_argument("--tag", default=None, help="Tag to use for regenerated reports (optional)")
     rerun_p.add_argument("--anonymous", action="store_true", help="Generate anonymized developer names")
+    rerun_p.add_argument(
+        "--yes",
+        "--no-confirm",
+        dest="yes",
+        action="store_true",
+        help="Skip confirmation prompt (assume yes)",
+    )
     # Rerun-local subcommand preserves previous behavior (no fresh fetch)
     rerun_local_p = subparsers.add_parser(
         "rerun-local", help="Regenerate reports from raw data without refetching GitHub"
@@ -518,6 +670,13 @@ def main(argv=None) -> int:
     rerun_local_p.add_argument("--raw", default=None, help="Path to dev-skill-raw-*.json (optional)")
     rerun_local_p.add_argument("--tag", default=None, help="Tag to use for regenerated reports (optional)")
     rerun_local_p.add_argument("--anonymous", action="store_true", help="Generate anonymized developer names")
+    rerun_local_p.add_argument(
+        "--yes",
+        "--no-confirm",
+        dest="yes",
+        action="store_true",
+        help="Skip confirmation prompt (assume yes)",
+    )
     p.add_argument("--repo-url", required=False, help="owner/repo or GitHub URL")
     p.add_argument("--days", type=int, default=None)
     p.add_argument("--outdir", default=None, help="Output directory (default: ./reports)")
@@ -568,6 +727,10 @@ def main(argv=None) -> int:
         ado_qa_failed_states = list(ado_meta.get("qa_failed_states") or [])
         ado_disable = bool(args.ado_disable or not (ado_org and ado_project))
 
+        if not ado_disable:
+            ado.ensure_cli_latest()
+            ado.ensure_logged_in()
+
         cfg = _load_config(args.config)
         bots = list(cfg.get("bots", []))
 
@@ -586,10 +749,18 @@ def main(argv=None) -> int:
             console.print(f"[red]{e}[/red]")
             return 2
 
-        repo_list_display = ", ".join(f"{o}/{r}" for o, r in selected_repos)
-        console.print(f"[dim]Repos:[/dim] {repo_list_display}")
-        console.print(f"[dim]Date range:[/dim] {since_iso[:10]} → {until_iso[:10]}")
+        use_cache = not args.no_cache
         console.print(f"[dim]Output dir:[/dim] {outdir_path}")
+        if not _confirm_rerun(
+            console=console,
+            repos=selected_repos,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            use_cache=use_cache,
+            skip_prompt=getattr(args, "yes", False),
+        ):
+            console.print("[red]Aborted by user.[/red]")
+            return 0
         console.print("\n[bold yellow]Collecting fresh data...[/bold yellow]")
 
         repo_payloads: List[Dict[str, Any]] = []
@@ -603,7 +774,7 @@ def main(argv=None) -> int:
                 token=token,
                 bots=bots,
                 cache_dir=str(cache_dir),
-                use_cache=not args.no_cache,
+                use_cache=use_cache,
                 on_prs_progress=None,
                 on_commits_progress=None,
                 on_ado_progress=None,
@@ -612,13 +783,25 @@ def main(argv=None) -> int:
                 ado_ready_states=ado_ready_states,
                 ado_resolved_states=ado_resolved_states,
                 ado_qa_failed_states=ado_qa_failed_states,
-                ado_disable=ado_disable or bool(azure_data),
+                ado_disable=ado_disable,
+                ado_skip_lookup=True,
             )
-            if not azure_data:
-                azure_data = data.get("azure", {}) or {}
-            else:
-                data["azure"] = {}
             repo_payloads.append(data)
+
+        azure_data = _collect_ado_after_repos(
+            console=console,
+            ado_disable=ado_disable,
+            ado_org=ado_org,
+            ado_project=ado_project,
+            ado_ready_states=ado_ready_states,
+            ado_resolved_states=ado_resolved_states,
+            ado_qa_failed_states=ado_qa_failed_states,
+            repo_payloads=repo_payloads,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            cache_dir=cache_dir,
+            use_cache=use_cache,
+        )
 
         aggregated_data = _merge_repo_payloads(
             repos_data=repo_payloads,
@@ -726,6 +909,8 @@ def main(argv=None) -> int:
             return 2
 
         cfg = _load_config(args.config)
+        use_cache = not args.no_cache
+        selected_repos = _selected_repos_from_raw(data)
 
         # Determine output directory and tag
         outdir_path = Path(args.outdir) if args.outdir else raw_path.parent
@@ -735,6 +920,16 @@ def main(argv=None) -> int:
 
         console.print(f"[dim]Using raw:[/dim] {raw_path}")
         console.print(f"[dim]Output dir:[/dim] {outdir_path}")
+        if not _confirm_rerun(
+            console=console,
+            repos=selected_repos,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            use_cache=use_cache,
+            skip_prompt=getattr(args, "yes", False),
+        ):
+            console.print("[red]Aborted by user.[/red]")
+            return 0
         console.print("\n[bold yellow]Computing metrics and scores...[/bold yellow]")
 
         scores = metrics.compute_scores(
@@ -869,11 +1064,16 @@ def main(argv=None) -> int:
     ado_qa_failed_states = _states(args.ado_qa_failed_states, ado_cfg.get("qa_failed_states") or azure_cfg.get("qa_failed_states"))
     ado_disable = bool(args.ado_disable or not (ado_org and ado_project))
 
+    if not ado_disable:
+        ado.ensure_cli_latest()
+        ado.ensure_logged_in()
+
     outdir_path = Path(outdir)
     outdir_path.mkdir(parents=True, exist_ok=True)
 
     cache_dir = Path.cwd() / ".cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
+    use_cache = not args.no_cache
 
     console = Console()
 
@@ -893,7 +1093,6 @@ def main(argv=None) -> int:
         ) as progress:
             pr_task = progress.add_task("[cyan]Fetching pull requests...", total=None)
             commit_task = progress.add_task("[green]Fetching commits...", total=None)
-            ado_task = progress.add_task("[yellow]Fetching ADO tickets...", total=None)
             
             def on_prs_progress(status: str, count: int):
                 if status == "fetching":
@@ -911,22 +1110,6 @@ def main(argv=None) -> int:
                 elif status == "cached":
                     progress.update(commit_task, completed=100, total=100, description=f"[green]✓ Commits (cached: {count} total)")
 
-            def on_ado_progress(status: str, count: int):
-                if status == "fetching":
-                    progress.update(ado_task, description=f"[yellow]Fetching ADO tickets... ({count} fetched)")
-                elif status == "complete":
-                    progress.update(ado_task, completed=100, total=100, description=f"[yellow]✓ ADO tickets fetched ({count} total)")
-                elif status == "cached":
-                    progress.update(ado_task, completed=100, total=100, description=f"[yellow]✓ ADO tickets (cached: {count} total)")
-                elif status == "fetching-ids":
-                    progress.update(ado_task, description=f"[yellow]Fetching ADO ticket ids... ({count})")
-                elif status == "ids":
-                    progress.update(ado_task, description=f"[yellow]ADO ids discovered: {count}")
-                elif status == "disabled":
-                    progress.update(ado_task, completed=100, total=100, description="[yellow]ADO tickets disabled")
-                elif status == "skipped":
-                    progress.update(ado_task, completed=100, total=100, description="[yellow]✓ ADO tickets skipped (no references)")
-            
             data = collect.collect_repository_data(
                 owner=owner,
                 repo=repo,
@@ -935,28 +1118,40 @@ def main(argv=None) -> int:
                 token=token,
                 bots=bots,
                 cache_dir=str(cache_dir),
-                use_cache=not args.no_cache,
+                use_cache=use_cache,
                 on_prs_progress=on_prs_progress,
                 on_commits_progress=on_commits_progress,
-                on_ado_progress=on_ado_progress,
+                on_ado_progress=None,
                 ado_org=ado_org,
                 ado_project=ado_project,
                 ado_ready_states=ado_ready_states,
                 ado_resolved_states=ado_resolved_states,
                 ado_qa_failed_states=ado_qa_failed_states,
-                ado_disable=ado_disable or bool(azure_data),
+                ado_disable=ado_disable,
+                ado_skip_lookup=True,
             )
         console.print()
 
-        if not azure_data:
-            azure_data = data.get("azure", {}) or {}
-        else:
-            data["azure"] = {}
         repo_payloads.append(data)
 
     if not repo_payloads:
         console.print("[red]No repository data collected.[/red]")
         return 2
+
+    azure_data = _collect_ado_after_repos(
+        console=console,
+        ado_disable=ado_disable,
+        ado_org=ado_org,
+        ado_project=ado_project,
+        ado_ready_states=ado_ready_states,
+        ado_resolved_states=ado_resolved_states,
+        ado_qa_failed_states=ado_qa_failed_states,
+        repo_payloads=repo_payloads,
+        since_iso=since_iso,
+        until_iso=until_iso,
+        cache_dir=cache_dir,
+        use_cache=use_cache,
+    )
 
     is_multi = len(repo_payloads) > 1
     repo_label = "Multi-Repo" if is_multi else selected_repos[0][1]

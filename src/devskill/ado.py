@@ -34,89 +34,41 @@ def _run_az(args: List[str], env: Optional[Dict[str, str]] = None) -> Dict:
     try:
         return json.loads(proc.stdout or "{}")
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"Failed to parse az CLI JSON response: {e}") from e
+        output = proc.stdout or ""
+        if "<html" in output.lower() or "sign in" in output.lower():
+            raise RuntimeError(
+                "Azure DevOps CLI returned a sign-in page. "
+                "Please authenticate using `az login` or check your ADO credentials/permissions."
+            ) from e
+        # Include the stdout in the error message for debugging
+        raise RuntimeError(f"Failed to parse az CLI JSON response: {e}\nOutput was: {output!r}") from e
 
 
-_DEFAULT_API_VERSIONS = ("7.1", "7.0", "6.0")
-
-
-def _invoke_devops(
-    *,
-    area: str,
-    resource: str,
-    org_url: str,
-    route_parameters: Optional[Dict[str, str]] = None,
-    query_parameters: Optional[Dict[str, str]] = None,
-    api_versions: Iterable[str] = _DEFAULT_API_VERSIONS,
-    http_method: str = "GET",
-    body: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Invoke an Azure DevOps REST resource with explicit, stable API versions."""
-    versions = list(api_versions) if api_versions else list(_DEFAULT_API_VERSIONS)
-    last_exc: Optional[Exception] = None
-
-    for idx, api_ver in enumerate(versions):
-        cmd = [
-            "devops",
-            "invoke",
-            "--area",
-            area,
-            "--resource",
-            resource,
-            "--organization",
-            org_url,
-            "--api-version",
-            api_ver,
-        ]
-        if route_parameters:
-            cmd += ["--route-parameters"] + [f"{k}={v}" for k, v in route_parameters.items()]
-        if query_parameters:
-            cmd += ["--query-parameters"] + [f"{k}={v}" for k, v in query_parameters.items()]
-        if http_method and http_method.upper() != "GET":
-            cmd += ["--http-method", http_method]
-        if body is not None:
-            cmd += ["--request-body", json.dumps(body)]
-
-        try:
-            return _run_az(cmd)
-        except RuntimeError as exc:
-            last_exc = exc
-            msg = str(exc).lower()
-            if idx != len(versions) - 1 and (
-                "--resource and --api-version combination is not correct" in msg
-                or "api-version" in msg
-                or "could not convert string to float" in msg
-            ):
-                continue
-            raise
-
-    if last_exc:
-        raise last_exc
-    return {}
+_DEFAULT_API_VERSIONS = ("6.0",)
+# Azure DevOps resource ID for az rest so we get the correct AAD token
+_ADO_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
 
 
 def _fetch_work_item_updates(org_url: str, work_item_id: str) -> List[Dict]:
-    """Fetch work item updates via az devops invoke (works with PAT or AAD auth)."""
-    payload = _invoke_devops(
-        area="wit",
-        resource="workitems/{id}/updates",
-        org_url=org_url,
-        route_parameters={"id": work_item_id},
-        api_versions=_DEFAULT_API_VERSIONS,
-    )
-    return payload.get("value", []) or []
+    """Fetch work item updates via az rest (bypassing az devops invoke issues)."""
+    # Use api-version 6.0 as a stable baseline
+    url = f"{org_url}/_apis/wit/workitems/{work_item_id}/updates?api-version=6.0"
+    try:
+        payload = _run_az(
+            ["rest", "--method", "get", "--url", url, "--resource", _ADO_RESOURCE]
+        )
+        return payload.get("value", []) or []
+    except RuntimeError as e:
+        # If 404 or similar, just return empty updates?
+        # The original code caught Exception and warned.
+        print(f"Warning: failed to fetch updates for work item {work_item_id}: {e}", file=sys.stderr)
+        return []
 
 
 def _fetch_work_item(org_url: str, work_item_id: str) -> Dict[str, Any]:
-    """Fetch a work item with relations using stable API versions."""
-    return _invoke_devops(
-        area="wit",
-        resource="workitems",
-        org_url=org_url,
-        route_parameters={"id": work_item_id},
-        query_parameters={"$expand": "Relations"},
-        api_versions=_DEFAULT_API_VERSIONS,
-    )
+    """Fetch a work item with relations via az rest."""
+    url = f"{org_url}/_apis/wit/workitems/{work_item_id}?$expand=Relations&api-version=6.0"
+    return _run_az(["rest", "--method", "get", "--url", url, "--resource", _ADO_RESOURCE])
 
 
 def _cache_path(cache_dir: Path, org: str, project: str) -> Path:
@@ -225,9 +177,9 @@ def _query_work_item_ids(org_url: str, project: str, since_iso: str, until_iso: 
         query = (
             "Select [System.Id] From WorkItems "
             f"Where [System.TeamProject] = '{project}' "
-            f"AND [System.ChangedDate] >= '{cursor_date}' "
-            f"AND [System.ChangedDate] <= '{chunk_end_date}' "
-            "Order By [System.ChangedDate]"
+            f"AND [System.CreatedDate] >= '{cursor_date}' "
+            f"AND [System.CreatedDate] <= '{chunk_end_date}' "
+            "Order By [System.CreatedDate]"
         )
         try:
             payload = _run_az(
@@ -308,11 +260,68 @@ def collect_project_items(
     until_dt = _parse_iso_dt(until_iso)
     filtered_items: List[Dict[str, Any]] = []
     for item in items:
-        changed_raw = (item.get("fields") or {}).get("System.ChangedDate") or ""
-        changed_dt = _parse_iso_dt(str(changed_raw))
-        if since_dt <= changed_dt <= until_dt:
+        created_raw = (item.get("fields") or {}).get("System.CreatedDate") or ""
+        created_dt = _parse_iso_dt(str(created_raw))
+        if since_dt <= created_dt <= until_dt:
             filtered_items.append(item)
     items = filtered_items
+
+    return {
+        "org": org,
+        "project": project,
+        "since": since_iso,
+        "until": until_iso,
+        "ready_states": list(ready_states) if ready_states else [],
+        "resolved_states": list(resolved_states) if resolved_states else [],
+        "qa_failed_states": list(qa_failed_states) if qa_failed_states else [],
+        "work_items": items,
+        "iterations": iterations,
+        "count": len(items),
+    }
+
+
+def collect_work_items_by_ids(
+    org: str,
+    project: str,
+    ids: Iterable[int],
+    since_iso: str,
+    until_iso: str,
+    cache_dir: Optional[str] = None,
+    use_cache: bool = True,
+    ready_states: Optional[Iterable[str]] = None,
+    resolved_states: Optional[Iterable[str]] = None,
+    qa_failed_states: Optional[Iterable[str]] = None,
+    progress_callback: Optional[Callable[[str, int], None]] = None,
+) -> Dict[str, Any]:
+    """Collect specific work items (and updates) by explicit IDs, plus iterations."""
+    org_url = _normalize_org(org)
+    project_name = project
+
+    # Deduplicate and normalize IDs
+    unique_ids: List[int] = []
+    seen: set[int] = set()
+    for raw in ids:
+        try:
+            wid = int(raw)
+        except Exception:
+            continue
+        if wid not in seen:
+            seen.add(wid)
+            unique_ids.append(wid)
+
+    if progress_callback:
+        progress_callback("ids", len(unique_ids))
+
+    items = fetch_work_items(
+        ids=unique_ids,
+        org=org,
+        project=project,
+        cache_dir=cache_dir,
+        use_cache=use_cache,
+        progress_callback=progress_callback,
+    ) if unique_ids else []
+
+    iterations = _list_iterations(org_url, project_name)
 
     return {
         "org": org,
@@ -384,4 +393,24 @@ def fetch_work_items(
         progress_callback(status, len(results))
     return results
 
+
+def ensure_cli_latest() -> None:
+    """Ensure Azure CLI is up-to-date."""
+    try:
+        subprocess.run(["az", "upgrade", "--yes"], check=True, capture_output=True)
+    except Exception as e:
+        # Many environments (Homebrew, etc.) manage az externally and 'az upgrade' fails.
+        # We warn but don't hard-fail.
+        print(f"Warning: Failed to auto-update Azure CLI: {e}", file=sys.stderr)
+
+
+def ensure_logged_in() -> None:
+    """Ensure we have an active Azure CLI session, prompting login if needed."""
+    try:
+        # Check if we have an account
+        subprocess.run(["az", "account", "show"], check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        print("Azure CLI not logged in. Launching browser login...", file=sys.stderr)
+        # Interactive login
+        subprocess.run(["az", "login"], check=True)
 

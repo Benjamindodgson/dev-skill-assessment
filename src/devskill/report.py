@@ -20,6 +20,14 @@ def _fmt_pretty_date(iso: str) -> str:
     return f"{month} {day}{suffix}, {d.year}"
 
 
+def _inclusive_day_count(start_iso: str, end_iso: str) -> int:
+    """Return the inclusive day span between two ISO timestamps."""
+    start = dt.datetime.fromisoformat(start_iso.replace("Z", "+00:00")).astimezone(dt.timezone.utc).date()
+    end = dt.datetime.fromisoformat(end_iso.replace("Z", "+00:00")).astimezone(dt.timezone.utc).date()
+    delta = (end - start).days + 1
+    return max(delta, 1)
+
+
 def _fmt_folder_name(repo: str, date_iso: str) -> str:
     """Format folder name as: RepoName, Month Day, Year"""
     d = dt.datetime.fromisoformat(date_iso.replace("Z", "+00:00")).astimezone(dt.timezone.utc)
@@ -67,7 +75,8 @@ def generate_reports(
     md_path = report_dir / f"dev-skill-assessment-{tag}.md"
     team = scores.get("team", {})
     lines = []
-    lines.append(f"# 90-Day GitHub Dev Assessment\n")
+    day_count = _inclusive_day_count(since_iso, until_iso)
+    lines.append(f"# {day_count}-Day GitHub Dev Assessment\n")
     if repos:
         repo_list = ", ".join(f"{r.get('owner')}/{r.get('repo')}" for r in repos if r.get("owner") and r.get("repo"))
         repo_display = repo_list or f"{owner}/{repo}"

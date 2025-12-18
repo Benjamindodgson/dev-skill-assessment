@@ -297,6 +297,7 @@ def collect_repository_data(
     ado_resolved_states: Optional[Iterable[str]] = None,
     ado_qa_failed_states: Optional[Iterable[str]] = None,
     ado_disable: bool = False,
+    ado_skip_lookup: bool = False,
 ) -> Dict[str, Any]:
     cache = Path(cache_dir) if cache_dir else None
     if cache:
@@ -335,13 +336,26 @@ def collect_repository_data(
     prs = _filter_out_bots(prs, set(bots))
     commits = _filter_out_bots(commits, set(bots))
 
+    pr_bug_map = _extract_bug_ids_from_prs(prs)
+    pr_bug_ids: List[int] = []
+    seen_pr_ids: Set[int] = set()
+    for bug_ids in pr_bug_map.values():
+        for bid in bug_ids:
+            if bid not in seen_pr_ids:
+                seen_pr_ids.add(bid)
+                pr_bug_ids.append(bid)
+
     # Azure DevOps project collection (optional)
     azure_data: Dict[str, Any] = {}
-    if not ado_disable and ado_org and ado_project:
+    if ado_skip_lookup:
+        if on_ado_progress:
+            on_ado_progress("skipped", 0)
+    elif not ado_disable and ado_org and ado_project and pr_bug_ids:
         try:
-            azure_data = ado.collect_project_items(
+            azure_data = ado.collect_work_items_by_ids(
                 org=ado_org,
                 project=ado_project,
+                ids=pr_bug_ids,
                 since_iso=since_iso,
                 until_iso=until_iso,
                 cache_dir=cache_dir,
@@ -377,7 +391,7 @@ def collect_repository_data(
             "qa_failed_states": list(ado_qa_failed_states) if ado_qa_failed_states else [],
         },
         "ado_bug_items": [],
-        "ado_pr_bugs": {},
+        "ado_pr_bugs": pr_bug_map,
         "azure": azure_data,
     }
 

@@ -113,6 +113,62 @@ class AggregationTests(unittest.TestCase):
         )
         self.assertEqual(azure_scores["team"]["count"], 1)
 
+    def test_azure_per_developer_scoring_includes_devs(self):
+        since_iso = "2024-01-01T00:00:00Z"
+        until_iso = "2024-01-10T00:00:00Z"
+
+        azure_data = {
+            "since": since_iso,
+            "until": until_iso,
+            "ready_states": ["Ready"],
+            "resolved_states": ["Done"],
+            "qa_failed_states": ["QA Failed"],
+            "work_items": [
+                {
+                    "id": 1,
+                    "fields": {
+                        "System.CreatedDate": since_iso,
+                        "System.State": "Ready",
+                        "System.IterationPath": "Sprint1",
+                        "System.AssignedTo": {"uniqueName": "dev@example.com"},
+                        "Microsoft.VSTS.Scheduling.StoryPoints": 3,
+                    },
+                    "updates": [
+                        {
+                            "revisedDate": "2024-01-03T00:00:00Z",
+                            "fields": {"System.State": {"oldValue": "Ready", "newValue": "Done"}},
+                        }
+                    ],
+                }
+            ],
+            "iterations": [
+                {
+                    "id": "it1",
+                    "path": "Sprint1",
+                    "name": "Sprint1",
+                    "attributes": {"startDate": since_iso, "finishDate": until_iso},
+                }
+            ],
+        }
+
+        azure_scores = azure_metrics.compute_scores(
+            azure_data=azure_data,
+            config={},
+        )
+
+        self.assertEqual(azure_scores["team"]["count"], 1)
+        devs = azure_scores.get("developers") or []
+        self.assertEqual(len(devs), 1)
+        dev = devs[0]
+        self.assertEqual(dev.get("developer"), "dev@example.com")
+        subs = dev.get("subscores") or {}
+        self.assertIn("resolution", subs)
+        self.assertIn("predictability", subs)
+        self.assertIn("velocity", subs)
+        self.assertIn("quality", subs)
+        self.assertAlmostEqual(dev.get("score"), 50.0, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()
+

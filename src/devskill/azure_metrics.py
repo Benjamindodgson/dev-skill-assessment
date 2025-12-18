@@ -92,6 +92,21 @@ def _state_metrics(
     return ready_at, done_at, qa_failed
 
 
+def _assigned_email(fields: Dict[str, Any]) -> str:
+    """Return an email-like identity string for the assignee."""
+    assigned = fields.get("System.AssignedTo")
+    if isinstance(assigned, dict):
+        unique = assigned.get("uniqueName") or assigned.get("UniqueName")
+        if unique:
+            return str(unique)
+        display = assigned.get("displayName")
+        if display:
+            return str(display)
+    if isinstance(assigned, str):
+        return assigned
+    return "unassigned"
+
+
 def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """Compute Azure assessment scores (Resolution, Predictability, Velocity, Quality)."""
     if not azure_data:
@@ -123,6 +138,7 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
     qa_failed_counts: List[float] = []
     velocity_efforts: List[float] = []
     velocity_completed = 0
+    per_dev: Dict[str, Dict[str, Any]] = {}
 
     for item in work_items:
         fields = item.get("fields", {}) or {}
@@ -132,6 +148,18 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
         state_events = _state_events(updates, "System.State")
         iter_events = _state_events(updates, "System.IterationPath")
         iteration_initial = str(fields.get("System.IterationPath") or "")
+        assignee = _assigned_email(fields)
+
+        if assignee not in per_dev:
+            per_dev[assignee] = {
+                "resolution_hours": [],
+                "qa_failed_counts": [],
+                "velocity_efforts": [],
+                "velocity_completed": 0,
+                "predictability_ratios": [],
+                "items_count": 0,
+            }
+        per_dev[assignee]["items_count"] += 1
 
         ready_at, done_at, qa_failed = _state_metrics(
             created=created,
@@ -146,9 +174,11 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
         if ready_at and done_at and done_at >= ready_at:
             resolution_h = (done_at - ready_at).total_seconds() / 3600.0
             resolution_hours.append(resolution_h)
+            per_dev[assignee]["resolution_hours"].append(resolution_h)
 
         if qa_failed > 0:
             qa_failed_counts.append(float(qa_failed))
+            per_dev[assignee]["qa_failed_counts"].append(float(qa_failed))
 
         done_within_window = done_at is not None and since_dt <= done_at <= until_dt
         effort_raw = fields.get(effort_field)
@@ -159,6 +189,8 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
         if done_within_window:
             velocity_completed += 1
             velocity_efforts.append(effort)
+            per_dev[assignee]["velocity_completed"] += 1
+            per_dev[assignee]["velocity_efforts"].append(effort)
 
         items_summary.append(
             {
@@ -171,6 +203,7 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
                 "qa_failed_entries": qa_failed,
                 "resolution_hours": resolution_h,
                 "effort": effort,
+                "assignee": assignee,
                 "iteration_events": [
                     {"when": t.isoformat(), "old": old, "new": new} for t, old, new in iter_events
                 ],
@@ -180,6 +213,7 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
     # Predictability: per-iteration commitment completion
     iteration_rows: List[Dict[str, Any]] = []
     predictability_scores: List[float] = []
+    per_dev_predictability: Dict[str, List[float]] = {}
     for it in iterations:
         attrs = it.get("attributes", {}) or {}
         start = _parse_iso(attrs.get("startDate") or "")
@@ -190,6 +224,7 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
 
         committed = 0
         completed = 0
+        committed_by_dev: Dict[str, Dict[str, int]] = {}
         for item_summary, raw in zip(items_summary, work_items):
             iter_events = _state_events(raw.get("updates", []) or [], "System.IterationPath")
             iter_initial = str((raw.get("fields") or {}).get("System.IterationPath") or "")
@@ -198,11 +233,16 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
             if iter_value != path:
                 continue
             committed += 1
+            assignee = item_summary.get("assignee", "unassigned")
+            if assignee not in committed_by_dev:
+                committed_by_dev[assignee] = {"committed": 0, "completed": 0}
+            committed_by_dev[assignee]["committed"] += 1
             done_iso = item_summary.get("done_at")
             if done_iso:
                 done_at = _parse_iso(done_iso)
                 if done_at <= finish:
                     completed += 1
+                    committed_by_dev[assignee]["completed"] += 1
 
         ratio = 1.0 if committed == 0 else min(1.0, completed / committed)
         predictability_scores.append(ratio)
@@ -218,6 +258,9 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
                 "commitment_ratio": ratio,
             }
         )
+        for dev_id, stats in committed_by_dev.items():
+            dev_ratio = 1.0 if stats["committed"] == 0 else min(1.0, stats["completed"] / stats["committed"])
+            per_dev_predictability.setdefault(dev_id, []).append(dev_ratio)
 
     # Normalize dimensions
     def _score_from_values(values: List[float], higher_is_better: bool, empty_default: float = 0.5) -> float:
@@ -246,6 +289,53 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
     w_qual = float(weights.get("quality", 0.25))
 
     team_score01 = w_res * resolution_score + w_pred * predictability_score + w_vel * velocity_score + w_qual * quality_score
+
+    # Per-developer aggregates normalized across developers
+    dev_rows: List[Dict[str, Any]] = []
+    for dev, agg in per_dev.items():
+        res_median = _median(agg["resolution_hours"]) if agg["resolution_hours"] else 0.0
+        pred_scores = per_dev_predictability.get(dev, [])
+        pred_avg = sum(pred_scores) / len(pred_scores) if pred_scores else 0.5
+        vel_effort = sum(agg["velocity_efforts"])
+        qual_median = _median(agg["qa_failed_counts"]) if agg["qa_failed_counts"] else 0.0
+
+        dev_rows.append(
+            {
+                "developer": dev,
+                "resolution.median_hours": float(res_median),
+                "predictability.avg_ratio": float(pred_avg),
+                "velocity.completed_effort": float(vel_effort),
+                "quality.median_qa_failed": float(qual_median),
+            }
+        )
+
+    def _norm_field(rows: List[Dict[str, float]], key: str, higher_is_better: bool) -> List[float]:
+        vals = [float(r.get(key, 0.0)) for r in rows]
+        vals = _winsorize(vals)
+        return _minmax_norm(vals, higher_is_better)
+
+    developers: List[Dict[str, Any]] = []
+    if dev_rows:
+        res_norm = _norm_field(dev_rows, "resolution.median_hours", higher_is_better=False)
+        pred_norm = _norm_field(dev_rows, "predictability.avg_ratio", higher_is_better=True)
+        vel_norm = _norm_field(dev_rows, "velocity.completed_effort", higher_is_better=True)
+        qual_norm = _norm_field(dev_rows, "quality.median_qa_failed", higher_is_better=False)
+
+        for row, r_sc, p_sc, v_sc, q_sc in zip(dev_rows, res_norm, pred_norm, vel_norm, qual_norm):
+            dev_score01 = w_res * r_sc + w_pred * p_sc + w_vel * v_sc + w_qual * q_sc
+            developers.append(
+                {
+                    **row,
+                    "score": round(100.0 * dev_score01, 2),
+                    "subscores": {
+                        "resolution": round(100.0 * r_sc, 2),
+                        "predictability": round(100.0 * p_sc, 2),
+                        "velocity": round(100.0 * v_sc, 2),
+                        "quality": round(100.0 * q_sc, 2),
+                    },
+                }
+            )
+        developers.sort(key=lambda r: r.get("score", 0.0), reverse=True)
 
     return {
         "team": {
@@ -280,4 +370,6 @@ def compute_scores(azure_data: Dict[str, Any], config: Dict[str, Any]) -> Dict[s
             "items_with_qa_failed": len(qa_failed_counts),
         },
         "items": items_summary,
+        "developers": developers,
     }
+
