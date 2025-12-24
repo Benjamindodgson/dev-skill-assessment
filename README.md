@@ -68,8 +68,14 @@ devskill \
   - `--ado-resolved-states`: comma-separated resolved/closed state names (default from config)
   - `--ado-qa-failed-states`: comma-separated QA Failed state names (default from config)
   - `--ado-disable`: skip Azure DevOps enrichment even if org/project provided
+  - `--azure-exclude-emails`: comma-separated assignee emails to exclude from Azure assessment
 
 **Azure DevOps assessment:** When `ado.org` and `ado.project` are configured (or passed as flags), `devskill` fetches all project work items (and their updates) in the window, plus iteration dates. It computes a separate Azure assessment (Resolution Time, Predictability, Velocity, Quality) with configurable weights (see `config.yml` under `azure`). These scores do **not** change DevSkill (GitHub) scores; they are shown separately in the terminal and embedded into `dev-skill-raw-*.json` alongside the raw Azure payload.
+Resolution now uses SLA-based scoring (configurable at `azure.resolution_sla`):
+- Business-day timing (Mon–Fri, configurable) for duration calculations.
+- Bug/defect types use priority SLAs expressed in hours (defaults: Blocker 24, Critical 24, Major 72, Minor 120, Trivial 240) as pass/fail.
+- All other items (e.g., PBIs) use hourly buckets (defaults: ≤48h=100, ≤72h=75, ≤96h=50, ≤120h=25, >120h=0).
+Unassigned work items are skipped, and you can exclude specific assignee emails via `azure.exclude_emails` in `config.yml` or `--azure-exclude-emails`.
 
 Prereqs: Azure CLI with Azure DevOps extension (`az extension add --name azure-devops`) and an authenticated session (`az devops login` with PAT or `az login`). No enrichment occurs if org/project are omitted or `--ado-disable` is set.
 

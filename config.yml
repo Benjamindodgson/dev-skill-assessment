@@ -55,6 +55,12 @@ ado:
 
 # Azure assessment configuration
 azure:
+  # Org/project used for Azure assessment (defaults to ado.org/project if omitted)
+  org: ecolabcommercialsolutions
+  project: Pest Commercial Solutions
+  # Emails to exclude from Azure assessment (case-insensitive)
+  exclude_emails: []
+  # Unassigned work items are ignored for scoring
   weights:
     resolution: 0.25
     predictability: 0.25
@@ -64,6 +70,32 @@ azure:
   ready_states: ["Ready for Dev"]
   resolved_states: ["Resolved", "Closed", "Done"]
   qa_failed_states: ["QA Failed"]
+  # Resolution SLA configuration
+  resolution_sla:
+    # When true, resolution timing ignores weekend hours (Mon–Fri only)
+    use_business_days: true
+    # Work item types that use bug/defect SLAs
+    bug_types: ["Bug", "Defect"]
+    # Priority targets for bug/defect items, expressed in hours
+    # (still respects business-day timing when use_business_days is true)
+    bug_priority_hours:
+      Blocker: 24        # Same-day (24h)
+      Critical: 24       # Within 1 business day
+      Major: 72          # Within 3 business days
+      Minor: 120         # Within 5 business days
+      Trivial: 240       # Within 10 business days
+    # PBI resolution buckets (hours, inclusive upper bounds)
+    pbi_buckets:
+      - max_hours: 48
+        score: 100
+      - max_hours: 72
+        score: 75
+      - max_hours: 96
+        score: 50
+      - max_hours: 120
+        score: 25
+      - max_hours: null    # Anything above previous threshold
+        score: 0
 
 # QA assessment configuration (Azure DevOps)
 qa:
