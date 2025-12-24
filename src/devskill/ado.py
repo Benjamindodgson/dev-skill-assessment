@@ -414,3 +414,5 @@ def ensure_logged_in() -> None:
         # Interactive login
         subprocess.run(["az", "login"], check=True)
 
+
+

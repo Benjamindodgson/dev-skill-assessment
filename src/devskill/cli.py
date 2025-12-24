@@ -7,7 +7,7 @@ import time
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional, Set
+from typing import Any, Dict, List, Tuple, Optional
 
 try:
     import yaml  # type: ignore
@@ -18,10 +18,9 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 from rich.panel import Panel
-from rich.prompt import Confirm
 from rich.box import ROUNDED
 
-from . import collect, metrics, report, insights, azure_metrics, ado
+from . import collect, metrics, report, insights
 
 REPO_RE = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+)(?:\.git)?$")
  
@@ -35,211 +34,6 @@ def parse_repo_input(s: str) -> Tuple[str, str]:
         owner, repo = s.split("/", 1)
         return owner, repo
     raise ValueError("Expected 'owner/repo' or a GitHub URL")
-
-
-def _annotate_items(items: Optional[List[Dict[str, Any]]], owner: str, repo: str) -> List[Dict[str, Any]]:
-    """Attach owner/repo context to each item for downstream aggregation/reporting."""
-    annotated: List[Dict[str, Any]] = []
-    for it in items or []:
-        if isinstance(it, dict):
-            annotated.append({**it, "owner": owner, "repo": repo})
-        else:
-            annotated.append({"value": it, "owner": owner, "repo": repo})
-    return annotated
-
-
-def _merge_repo_payloads(
-    repos_data: List[Dict[str, Any]],
-    since_iso: str,
-    until_iso: str,
-    azure_data: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Combine per-repo payloads into a single run-level structure."""
-    combined_prs: List[Dict[str, Any]] = []
-    combined_commits: List[Dict[str, Any]] = []
-    repo_summaries: List[Dict[str, Any]] = []
-    repositories: List[Dict[str, Any]] = []
-    ado_meta: Dict[str, Any] = {}
-
-    for entry in repos_data:
-        owner = entry.get("owner")
-        repo = entry.get("repo")
-        prs = entry.get("pull_requests") or []
-        commits = entry.get("commits") or []
-
-        combined_prs.extend(_annotate_items(prs, owner, repo))
-        combined_commits.extend(_annotate_items(commits, owner, repo))
-        repo_summaries.append(
-            {
-                "owner": owner,
-                "repo": repo,
-                "pull_requests": len(prs),
-                "commits": len(commits),
-            }
-        )
-        repositories.append(entry)
-        if not ado_meta:
-            ado_meta = entry.get("ado") or {}
-
-    merged_owner = "multiple" if len(repo_summaries) > 1 else (repo_summaries[0]["owner"] if repo_summaries else "")
-    merged_repo = "aggregate" if len(repo_summaries) > 1 else (repo_summaries[0]["repo"] if repo_summaries else "")
-
-    merged: Dict[str, Any] = {
-        "owner": merged_owner,
-        "repo": merged_repo,
-        "since": since_iso,
-        "until": until_iso,
-        "pull_requests": combined_prs,
-        "commits": combined_commits,
-        "repos": repo_summaries,
-        "repositories": repositories,
-        "ado": ado_meta,
-        "ado_bug_items": [],
-        "ado_pr_bugs": {},
-    }
-    if azure_data is not None:
-        merged["azure"] = azure_data
-    return merged
-
-
-def _work_item_ids_from_repos(repos_data: List[Dict[str, Any]]) -> List[int]:
-    """Extract unique ADO work item IDs from PR titles (AB#123456)."""
-    ids: List[int] = []
-    seen: Set[int] = set()
-    for entry in repos_data:
-        prs = entry.get("pull_requests") or []
-        for bug_ids in collect._extract_bug_ids_from_prs(prs).values():
-            for bid in bug_ids:
-                if bid not in seen:
-                    seen.add(bid)
-                    ids.append(bid)
-    return ids
-
-
-def _collect_ado_after_repos(
-    console: Console,
-    *,
-    ado_disable: bool,
-    ado_org: Optional[str],
-    ado_project: Optional[str],
-    ado_ready_states: List[str],
-    ado_resolved_states: List[str],
-    ado_qa_failed_states: List[str],
-    repo_payloads: List[Dict[str, Any]],
-    since_iso: str,
-    until_iso: str,
-    cache_dir: Path,
-    use_cache: bool,
-) -> Dict[str, Any]:
-    """Collect Azure DevOps data after all repos are fetched, showing a spinner with counts."""
-    if ado_disable or not (ado_org and ado_project):
-        return {}
-
-    pr_bug_ids = _work_item_ids_from_repos(repo_payloads)
-    if not pr_bug_ids:
-        return {}
-
-    total_ids = len(pr_bug_ids)
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold yellow]{task.description}"),
-        console=console,
-    ) as progress:
-        azure_task = progress.add_task("[yellow]Fetching Azure DevOps data...", total=None)
-
-        def on_ado_progress(status: str, count: int) -> None:
-            pct = ""
-            if total_ids:
-                pct_val = min(100, int((count / total_ids) * 100))
-                pct = f" {pct_val}%"
-
-            if status == "fetching-ids":
-                desc = f"[yellow]Discovering Azure work item ids... ({count}/{total_ids}{pct})"
-            elif status == "ids":
-                desc = f"[yellow]Azure work item ids discovered: {count}/{total_ids}"
-            elif status == "fetching":
-                desc = f"[yellow]Fetching Azure work items... ({count}/{total_ids}{pct})"
-            elif status == "cached":
-                desc = f"[yellow]✓ Azure work items (cached: {count}/{total_ids})"
-            elif status == "complete":
-                desc = f"[yellow]✓ Azure work items fetched ({count}/{total_ids})"
-            else:
-                desc = f"[yellow]Azure DevOps status: {status} ({count})"
-            progress.update(azure_task, description=desc)
-
-        azure_data: Dict[str, Any] = {}
-        try:
-            azure_data = ado.collect_work_items_by_ids(
-                org=ado_org,
-                project=ado_project,
-                ids=pr_bug_ids,
-                since_iso=since_iso,
-                until_iso=until_iso,
-                cache_dir=str(cache_dir),
-                use_cache=use_cache,
-                ready_states=ado_ready_states,
-                resolved_states=ado_resolved_states,
-                qa_failed_states=ado_qa_failed_states,
-                progress_callback=on_ado_progress,
-            )
-            final_count = azure_data.get("count", 0)
-            progress.update(
-                azure_task,
-                description=f"[yellow]✓ Azure work items fetched ({final_count} total)",
-            )
-        except Exception as e:
-            progress.update(azure_task, description="[red]Azure DevOps lookup failed[/red]")
-            console.print(f"\n[red]Warning: ADO collection failed: {e}[/red]")
-            azure_data = {}
-        finally:
-            progress.stop_task(azure_task)
-
-    return azure_data
-
-
-def _selected_repos_from_raw(raw: Dict[str, Any]) -> List[Tuple[str, str]]:
-    """Extract selected repos from a raw payload (supports aggregated runs)."""
-    repos: List[Tuple[str, str]] = []
-    for entry in (raw.get("repos") or []):
-        owner, repo = entry.get("owner"), entry.get("repo")
-        if owner and repo:
-            repos.append((owner, repo))
-    if not repos:
-        for entry in (raw.get("repositories") or []):
-            owner, repo = entry.get("owner"), entry.get("repo")
-            if owner and repo:
-                repos.append((owner, repo))
-    if not repos and raw.get("owner") and raw.get("repo"):
-        repos.append((raw.get("owner"), raw.get("repo")))
-    return repos
-
-
-def _confirm_rerun(
-    console: Console,
-    *,
-    repos: List[Tuple[str, str]],
-    since_iso: Optional[str],
-    until_iso: Optional[str],
-    use_cache: bool,
-    skip_prompt: bool = False,
-) -> bool:
-    """Print a concise summary and ask for confirmation (default: proceed)."""
-    repo_list_display = ", ".join(f"{o}/{r}" for o, r in repos if o and r) or "<unknown>"
-    since_label = (since_iso or "?")[:10]
-    until_label = (until_iso or "?")[:10]
-    cache_label = "enabled (default)" if use_cache else "disabled (--no-cache)"
-
-    console.print("\n[bold]Confirm rerun configuration[/bold]")
-    console.print(f"[dim]Repos:[/dim] {repo_list_display}")
-    console.print(f"[dim]Date range:[/dim] {since_label} → {until_label}")
-    console.print(f"[dim]Cache:[/dim] {cache_label}")
-
-    if skip_prompt:
-        console.print("[dim]Skipping confirmation (flag set).[/dim]")
-        return True
-
-    return bool(Confirm.ask("[bold yellow]Proceed?[/bold yellow]", default=True))
 
 
 def _load_config(path: Any, verbose: bool = True) -> Dict[str, Any]:
@@ -376,8 +170,8 @@ def _prompt_authentication() -> str:
         return _get_github_token()
 
 
-def _prompt_repo_selection(token: str) -> List[Tuple[str, str]]:
-    """Display available repos and prompt user to select one or more."""
+def _prompt_repo_selection(token: str) -> Tuple[str, str]:
+    """Display available repos and prompt user to select one."""
     print("\nFetching your repositories...")
     repos = _list_user_repos(token)
     
@@ -401,34 +195,19 @@ def _prompt_repo_selection(token: str) -> List[Tuple[str, str]]:
     
     while True:
         try:
-            selection = input(
-                f"\nSelect repository number(s) (1-{len(repos)}), separated by commas or spaces: "
-            ).strip()
-            if not selection:
-                raise ValueError
-
-            parts = [p for p in re.split(r"[\s,]+", selection) if p]
-            indices: List[int] = []
-            seen = set()
-            for part in parts:
-                idx = int(part) - 1
-                if idx < 0 or idx >= len(repos):
-                    raise ValueError
-                if idx in seen:
-                    continue
-                seen.add(idx)
-                indices.append(idx)
-
-            if not indices:
-                raise ValueError
-
-            selected = [repos[i] for i in indices]
-            selected_labels = ", ".join(f"{r['owner']['login']}/{r['name']}" for r in selected)
-            print(f"✓ Selected: {selected_labels}")
-            return [(r["owner"]["login"], r["name"]) for r in selected]
-        except ValueError:
-            print(f"Please enter number(s) between 1 and {len(repos)}, separated by commas or spaces.")
-        except (KeyboardInterrupt, EOFError):
+            selection = input(f"\nSelect repository number (1-{len(repos)}): ").strip()
+            idx = int(selection) - 1
+            if 0 <= idx < len(repos):
+                selected = repos[idx]
+                owner = selected["owner"]["login"]
+                name = selected["name"]
+                print(f"✓ Selected: {owner}/{name}")
+                return owner, name
+            else:
+                print(f"Please enter a number between 1 and {len(repos)}")
+        except (ValueError, KeyboardInterrupt):
+            print("\nInvalid input. Please enter a number.")
+        except EOFError:
             print("\nAborted.")
             sys.exit(1)
 
@@ -502,12 +281,6 @@ def _discover_latest_raw(search_root: Optional[str]) -> Optional[Path]:
     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return candidates[0]
 
-def _resolve_raw_path(raw_arg: Optional[str], outdir_arg: Optional[str]) -> Optional[Path]:
-    """Return explicit raw path or discover the latest raw JSON."""
-    if raw_arg:
-        return Path(raw_arg)
-    return _discover_latest_raw(outdir_arg)
-
 
 def _derive_tag_from_raw_filename(p: Path) -> Optional[str]:
     name = p.name
@@ -526,15 +299,11 @@ def _print_terminal_summary(
     since_iso: str,
     until_iso: str,
     named: bool = True,
-    azure_scores: Optional[Dict[str, Any]] = None,
-    repo_label: Optional[str] = None,
-    repos: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     team = scores.get("team", {})
     devs = scores.get("developers", [])
 
-    display_repo = repo_label or f"{owner}/{repo}"
-    title = f"{display_repo} — {since_iso[:10]} → {until_iso[:10]}"
+    title = f"{owner}/{repo} — {since_iso[:10]} → {until_iso[:10]}"
     team_score = float(team.get("score", 0.0))
     console.print(
         Panel.fit(
@@ -545,10 +314,6 @@ def _print_terminal_summary(
             box=ROUNDED,
         )
     )
-    if repos:
-        repo_list = ", ".join(f"{r.get('owner')}/{r.get('repo')}" for r in repos if r.get("owner") and r.get("repo"))
-        if repo_list:
-            console.print(f"[dim]Repositories: {repo_list}[/dim]")
 
     table = Table(box=ROUNDED, header_style="bold cyan", show_lines=False)
     table.add_column("#", justify="right")
@@ -574,79 +339,6 @@ def _print_terminal_summary(
 
     console.print(table)
 
-    # Azure assessment summary
-    if azure_scores:
-        az_team = azure_scores.get("team", {}) or {}
-        has_azure = (az_team.get("count", 0) or 0) > 0 or bool(
-            (azure_scores.get("resolution") or {}).get("samples")
-            or (azure_scores.get("predictability") or {}).get("iterations")
-        )
-        if has_azure:
-            az_subs = az_team.get("subscores", {}) or {}
-            az_resolution = azure_scores.get("resolution", {}) or {}
-            az_predictability = azure_scores.get("predictability", {}) or {}
-            az_velocity = azure_scores.get("velocity", {}) or {}
-            az_quality = azure_scores.get("quality", {}) or {}
-
-            console.print(
-                Panel.fit(
-                    f"Team Score: {float(az_team.get('score', 0.0)):.2f}",
-                    title="[bold]Azure Assessment[/bold]",
-                    subtitle=f"{since_iso[:10]} → {until_iso[:10]}",
-                    border_style="magenta",
-                    box=ROUNDED,
-                )
-            )
-
-            az_table = Table(box=ROUNDED, header_style="bold magenta", show_lines=False, title="Azure subscores")
-            az_table.add_column("Metric", justify="left")
-            az_table.add_column("Score", justify="right")
-            az_table.add_column("Detail", justify="left")
-            az_table.add_row(
-                "Resolution",
-                f"{float(az_subs.get('resolution', 0.0)):.2f}",
-                f"Median ready→done: {float(az_resolution.get('median_hours', 0.0)):.1f}h",
-            )
-            az_table.add_row(
-                "Predictability",
-                f"{float(az_subs.get('predictability', 0.0)):.2f}",
-                f"Avg commitment: {float(az_predictability.get('average_ratio', 0.0)):.2f}",
-            )
-            az_table.add_row(
-                "Velocity",
-                f"{float(az_subs.get('velocity', 0.0)):.2f}",
-                f"Completed effort: {float(az_velocity.get('completed_effort', 0.0)):.1f}",
-            )
-            az_table.add_row(
-                "Quality",
-                f"{float(az_subs.get('quality', 0.0)):.2f}",
-                f"Median QA fails: {float(az_quality.get('median_qa_failed', 0.0)):.1f}",
-            )
-            console.print(az_table)
-            az_devs = azure_scores.get("developers") or []
-            if az_devs:
-                az_dev_table = Table(box=ROUNDED, header_style="bold magenta", show_lines=False, title="Azure developers")
-                az_dev_table.add_column("#", justify="right")
-                az_dev_table.add_column("Developer", justify="left")
-                az_dev_table.add_column("Resolution", justify="right")
-                az_dev_table.add_column("Predictability", justify="right")
-                az_dev_table.add_column("Velocity", justify="right")
-                az_dev_table.add_column("Quality", justify="right")
-
-                for idx, row in enumerate(az_devs, 1):
-                    subs = row.get("subscores", {}) or {}
-                    az_dev_table.add_row(
-                        str(idx),
-                        str(row.get("developer", "unknown")),
-                        f"{float(subs.get('resolution', 0.0)):.2f}",
-                        f"{float(subs.get('predictability', 0.0)):.2f}",
-                        f"{float(subs.get('velocity', 0.0)):.2f}",
-                        f"{float(subs.get('quality', 0.0)):.2f}",
-                    )
-                console.print(az_dev_table)
-        else:
-            console.print("[dim]Azure assessment unavailable (no ADO items in window).[/dim]")
-
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser("devskill")
@@ -656,239 +348,31 @@ def main(argv=None) -> int:
     rerun_p.add_argument("--raw", default=None, help="Path to dev-skill-raw-*.json (optional)")
     rerun_p.add_argument("--tag", default=None, help="Tag to use for regenerated reports (optional)")
     rerun_p.add_argument("--anonymous", action="store_true", help="Generate anonymized developer names")
-    rerun_p.add_argument(
-        "--yes",
-        "--no-confirm",
-        dest="yes",
-        action="store_true",
-        help="Skip confirmation prompt (assume yes)",
-    )
-    # Rerun-local subcommand preserves previous behavior (no fresh fetch)
-    rerun_local_p = subparsers.add_parser(
-        "rerun-local", help="Regenerate reports from raw data without refetching GitHub"
-    )
-    rerun_local_p.add_argument("--raw", default=None, help="Path to dev-skill-raw-*.json (optional)")
-    rerun_local_p.add_argument("--tag", default=None, help="Tag to use for regenerated reports (optional)")
-    rerun_local_p.add_argument("--anonymous", action="store_true", help="Generate anonymized developer names")
-    rerun_local_p.add_argument(
-        "--yes",
-        "--no-confirm",
-        dest="yes",
-        action="store_true",
-        help="Skip confirmation prompt (assume yes)",
-    )
     p.add_argument("--repo-url", required=False, help="owner/repo or GitHub URL")
     p.add_argument("--days", type=int, default=None)
     p.add_argument("--outdir", default=None, help="Output directory (default: ./reports)")
     p.add_argument("--config", default=None)
     p.add_argument("--no-cache", action="store_true")
-    p.add_argument("--ado-org", default=None, help="Azure DevOps org (e.g., ecolabcommercialsolutions or https://dev.azure.com/org)")
-    p.add_argument("--ado-project", default=None, help="Azure DevOps project name")
-    p.add_argument("--ado-ready-states", default=None, help="Comma-separated states considered Ready for Dev")
-    p.add_argument("--ado-resolved-states", default=None, help="Comma-separated states considered Resolved/Closed")
-    p.add_argument("--ado-qa-failed-states", default=None, help="Comma-separated states representing QA Failed")
-    p.add_argument("--ado-disable", action="store_true", help="Disable Azure DevOps bug enrichment even if org/project provided")
-    p.add_argument("--tag", default=None, help="Tag to use for reports (optional)")
     args = p.parse_args(argv)
 
-    # Handle rerun subcommand: rerun the previous query by re-collecting data for the same window
+    # Handle rerun subcommand: reuse last raw JSON, recompute metrics, regenerate reports/insights
     if getattr(args, "command", None) == "rerun":
         console = Console()
-        console.print("[bold cyan]Re-running last query with fresh data[/bold cyan]")
+        console.print("[bold cyan]Rerunning from last raw data[/bold cyan]")
 
-        raw_path = _resolve_raw_path(getattr(args, "raw", None), args.outdir)
-        if not raw_path:
-            console.print("[red]No dev-skill-raw-*.json found.[/red]")
-            console.print("Hint: pass --raw PATH or --outdir DIR to search in.")
-            return 2
-        if not raw_path.exists():
-            console.print(f"[red]Raw file not found:[/red] {raw_path}")
-            return 2
-
-        try:
-            with raw_path.open("r", encoding="utf-8") as f:
-                previous_raw = json.load(f)
-        except Exception as e:
-            console.print(f"[red]Failed to read raw JSON:[/red] {e}")
-            return 2
-
-        selected_repos = _selected_repos_from_raw(previous_raw)
-        since_iso = previous_raw.get("since")
-        until_iso = previous_raw.get("until")
-        if not selected_repos or not all([since_iso, until_iso]):
-            console.print("[red]Raw JSON missing required fields (repos, since, until).[/red]")
-            return 2
-
-        ado_meta = previous_raw.get("ado") or {}
-        ado_org = ado_meta.get("org")
-        ado_project = ado_meta.get("project")
-        ado_ready_states = list(ado_meta.get("ready_states") or [])
-        ado_resolved_states = list(ado_meta.get("resolved_states") or [])
-        ado_qa_failed_states = list(ado_meta.get("qa_failed_states") or [])
-        ado_disable = bool(args.ado_disable or not (ado_org and ado_project))
-
-        if not ado_disable:
-            ado.ensure_cli_latest()
-            ado.ensure_logged_in()
-
-        cfg = _load_config(args.config)
-        bots = list(cfg.get("bots", []))
-
-        # Determine output directory and tag
-        outdir_path = Path(args.outdir) if args.outdir else raw_path.parent
-        outdir_path.mkdir(parents=True, exist_ok=True)
-
-        tag = args.tag or _derive_tag_from_raw_filename(raw_path) or f"{len(selected_repos)}-repos-{dt.datetime.utcnow():%Y-%m-%d}"
-
-        cache_dir = Path.cwd() / ".cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            token = _get_github_token()
-        except RuntimeError as e:
-            console.print(f"[red]{e}[/red]")
-            return 2
-
-        use_cache = not args.no_cache
-        console.print(f"[dim]Output dir:[/dim] {outdir_path}")
-        if not _confirm_rerun(
-            console=console,
-            repos=selected_repos,
-            since_iso=since_iso,
-            until_iso=until_iso,
-            use_cache=use_cache,
-            skip_prompt=getattr(args, "yes", False),
-        ):
-            console.print("[red]Aborted by user.[/red]")
-            return 0
-        console.print("\n[bold yellow]Collecting fresh data...[/bold yellow]")
-
-        repo_payloads: List[Dict[str, Any]] = []
-        azure_data: Dict[str, Any] = {}
-        for owner, repo in selected_repos:
-            data = collect.collect_repository_data(
-                owner=owner,
-                repo=repo,
-                since_iso=since_iso,
-                until_iso=until_iso,
-                token=token,
-                bots=bots,
-                cache_dir=str(cache_dir),
-                use_cache=use_cache,
-                on_prs_progress=None,
-                on_commits_progress=None,
-                on_ado_progress=None,
-                ado_org=ado_org,
-                ado_project=ado_project,
-                ado_ready_states=ado_ready_states,
-                ado_resolved_states=ado_resolved_states,
-                ado_qa_failed_states=ado_qa_failed_states,
-                ado_disable=ado_disable,
-                ado_skip_lookup=True,
-            )
-            repo_payloads.append(data)
-
-        azure_data = _collect_ado_after_repos(
-            console=console,
-            ado_disable=ado_disable,
-            ado_org=ado_org,
-            ado_project=ado_project,
-            ado_ready_states=ado_ready_states,
-            ado_resolved_states=ado_resolved_states,
-            ado_qa_failed_states=ado_qa_failed_states,
-            repo_payloads=repo_payloads,
-            since_iso=since_iso,
-            until_iso=until_iso,
-            cache_dir=cache_dir,
-            use_cache=use_cache,
-        )
-
-        aggregated_data = _merge_repo_payloads(
-            repos_data=repo_payloads,
-            since_iso=since_iso,
-            until_iso=until_iso,
-            azure_data=azure_data if not ado_disable else {},
-        )
-        repo_label = "Multi-Repo" if len(selected_repos) > 1 else selected_repos[0][1]
-        owner_label = "Multiple" if len(selected_repos) > 1 else selected_repos[0][0]
-
-        console.print("\n[bold yellow]Computing metrics and scores...[/bold yellow]")
-        scores = metrics.compute_scores(
-            data=aggregated_data,
-            owner=owner_label,
-            repo=repo_label,
-            since_iso=since_iso,
-            until_iso=until_iso,
-            config=cfg,
-        )
-        azure_scores = azure_metrics.compute_scores(
-            azure_data=aggregated_data.get("azure", {}) or {},
-            config=cfg,
-        )
-
-        # Create dated subfolder for reports
-        folder_name = report._fmt_folder_name(repo_label, until_iso)
-        report_subdir = outdir_path / folder_name
-        report_subdir.mkdir(parents=True, exist_ok=True)
-
-        raw_out = report_subdir / f"dev-skill-raw-{tag}.json"
-        raw_payload = {**aggregated_data, "devskill_scores": scores, "azure_assessment": azure_scores}
-        with raw_out.open("w", encoding="utf-8") as f:
-            json.dump(raw_payload, f, indent=2, sort_keys=True)
-        console.print(f"[dim]Wrote refreshed raw data → {raw_out}[/dim]")
-
-        console.print("[bold magenta]Generating reports...[/bold magenta]")
-        report.generate_reports(
-            scores=scores,
-            outdir=str(outdir_path),
-            owner=owner_label,
-            repo=repo_label,
-            since_iso=since_iso,
-            until_iso=until_iso,
-            named=not getattr(args, "anonymous", False),
-            tag=tag,
-            repos=aggregated_data.get("repos"),
-        )
-        insights.generate_insights(
-            scores=scores,
-            data=aggregated_data,
-            outdir=str(outdir_path),
-            owner=owner_label,
-            repo=repo_label,
-            since_iso=since_iso,
-            until_iso=until_iso,
-            small_pr_threshold=float(((cfg.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300),
-            tag=tag,
-            repos=aggregated_data.get("repos"),
-        )
-        _print_terminal_summary(
-            console=console,
-            scores=scores,
-            owner=owner_label,
-            repo=repo_label,
-            since_iso=since_iso,
-            until_iso=until_iso,
-            named=not getattr(args, "anonymous", False),
-            azure_scores=azure_scores,
-            repo_label=repo_label,
-            repos=aggregated_data.get("repos"),
-        )
-        console.print(f"\n[bold green]✓ Reports regenerated in {report_subdir}[/bold green]")
-        return 0
-
-    # Handle rerun-local subcommand: reuse last raw JSON without refetching
-    if getattr(args, "command", None) == "rerun-local":
-        console = Console()
-        console.print("[bold magenta]Regenerating from existing raw data (no refetch)[/bold magenta]")
-
-        raw_path = _resolve_raw_path(getattr(args, "raw", None), args.outdir)
-        if not raw_path:
-            console.print("[red]No dev-skill-raw-*.json found.[/red]")
-            console.print("Hint: pass --raw PATH or --outdir DIR to search in.")
-            return 2
-        if not raw_path.exists():
-            console.print(f"[red]Raw file not found:[/red] {raw_path}")
-            return 2
+        raw_path: Optional[Path]
+        if getattr(args, "raw", None):
+            raw_path = Path(args.raw)
+            if not raw_path.exists():
+                console.print(f"[red]Raw file not found:[/red] {raw_path}")
+                return 2
+        else:
+            # Search using provided outdir as root if given; else defaults
+            raw_path = _discover_latest_raw(args.outdir)
+            if not raw_path:
+                console.print("[red]No dev-skill-raw-*.json found.[/red]")
+                console.print("Hint: pass --raw PATH or --outdir DIR to search in.")
+                return 2
 
         try:
             with raw_path.open("r", encoding="utf-8") as f:
@@ -899,9 +383,6 @@ def main(argv=None) -> int:
 
         owner = data.get("owner")
         repo = data.get("repo")
-        repos_meta = data.get("repos") or []
-        repo_label = "Multi-Repo" if len(repos_meta) > 1 else repo
-        owner_label = "Multiple" if len(repos_meta) > 1 else owner
         since_iso = data.get("since")
         until_iso = data.get("until")
         if not all([owner, repo, since_iso, until_iso]):
@@ -909,8 +390,6 @@ def main(argv=None) -> int:
             return 2
 
         cfg = _load_config(args.config)
-        use_cache = not args.no_cache
-        selected_repos = _selected_repos_from_raw(data)
 
         # Determine output directory and tag
         outdir_path = Path(args.outdir) if args.outdir else raw_path.parent
@@ -920,77 +399,52 @@ def main(argv=None) -> int:
 
         console.print(f"[dim]Using raw:[/dim] {raw_path}")
         console.print(f"[dim]Output dir:[/dim] {outdir_path}")
-        if not _confirm_rerun(
-            console=console,
-            repos=selected_repos,
-            since_iso=since_iso,
-            until_iso=until_iso,
-            use_cache=use_cache,
-            skip_prompt=getattr(args, "yes", False),
-        ):
-            console.print("[red]Aborted by user.[/red]")
-            return 0
         console.print("\n[bold yellow]Computing metrics and scores...[/bold yellow]")
 
         scores = metrics.compute_scores(
             data=data,
-            owner=owner_label,
-            repo=repo_label,
+            owner=owner,
+            repo=repo,
             since_iso=since_iso,
             until_iso=until_iso,
             config=cfg,
         )
-        azure_scores = azure_metrics.compute_scores(
-            azure_data=data.get("azure", {}) or {},
-            config=cfg,
-        )
 
         # Create dated subfolder for reports
-        folder_name = report._fmt_folder_name(repo_label, until_iso)
+        folder_name = report._fmt_folder_name(repo, until_iso)
         report_subdir = outdir_path / folder_name
         report_subdir.mkdir(parents=True, exist_ok=True)
-
-        raw_out = report_subdir / f"dev-skill-raw-{tag}.json"
-        raw_payload = {**data, "devskill_scores": scores, "azure_assessment": azure_scores}
-        with raw_out.open("w", encoding="utf-8") as f:
-            json.dump(raw_payload, f, indent=2, sort_keys=True)
-        console.print(f"[dim]Wrote raw data → {raw_out}[/dim]")
 
         console.print("[bold magenta]Generating reports...[/bold magenta]")
         report.generate_reports(
             scores=scores,
             outdir=str(outdir_path),
-            owner=owner_label,
-            repo=repo_label,
+            owner=owner,
+            repo=repo,
             since_iso=since_iso,
             until_iso=until_iso,
             named=not getattr(args, "anonymous", False),
             tag=tag,
-            repos=repos_meta or data.get("repositories"),
         )
         insights.generate_insights(
             scores=scores,
             data=data,
             outdir=str(outdir_path),
-            owner=owner_label,
-            repo=repo_label,
+            owner=owner,
+            repo=repo,
             since_iso=since_iso,
             until_iso=until_iso,
             small_pr_threshold=float(((cfg.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300),
             tag=tag,
-            repos=repos_meta or data.get("repositories"),
         )
         _print_terminal_summary(
             console=console,
             scores=scores,
-            owner=owner_label,
-            repo=repo_label,
+            owner=owner,
+            repo=repo,
             since_iso=since_iso,
             until_iso=until_iso,
             named=not getattr(args, "anonymous", False),
-            azure_scores=azure_scores,
-            repo_label=repo_label,
-            repos=repos_meta or data.get("repositories"),
         )
         console.print(f"\n[bold green]✓ Reports regenerated in {report_subdir}[/bold green]")
         return 0
@@ -1008,8 +462,8 @@ def main(argv=None) -> int:
             print(str(e), file=sys.stderr)
             return 2
         
-        # Prompt for repository selection (supports multiple)
-        selected_repos = _prompt_repo_selection(token)
+        # Prompt for repository selection
+        owner, repo = _prompt_repo_selection(token)
         
         # Prompt for other parameters
         days = _prompt_days()
@@ -1026,7 +480,6 @@ def main(argv=None) -> int:
     else:
         # CLI mode: use provided arguments
         owner, repo = parse_repo_input(args.repo_url.strip())
-        selected_repos = [(owner, repo)]
         try:
             token = _get_github_token()
         except RuntimeError as e:
@@ -1049,196 +502,116 @@ def main(argv=None) -> int:
 
     cfg = _load_config(config_path)
     bots = list(cfg.get("bots", []))
-    ado_cfg = cfg.get("ado") or {}
-    azure_cfg = cfg.get("azure") or {}
-    ado_org = args.ado_org or ado_cfg.get("org")
-    ado_project = args.ado_project or ado_cfg.get("project")
-
-    def _states(value: Optional[str], fallback: Any) -> List[str]:
-        if value:
-            return [s.strip() for s in value.split(",") if s.strip()]
-        return list(fallback or [])
-
-    ado_ready_states = _states(args.ado_ready_states, ado_cfg.get("ready_states") or azure_cfg.get("ready_states"))
-    ado_resolved_states = _states(args.ado_resolved_states, ado_cfg.get("resolved_states") or azure_cfg.get("resolved_states"))
-    ado_qa_failed_states = _states(args.ado_qa_failed_states, ado_cfg.get("qa_failed_states") or azure_cfg.get("qa_failed_states"))
-    ado_disable = bool(args.ado_disable or not (ado_org and ado_project))
-
-    if not ado_disable:
-        ado.ensure_cli_latest()
-        ado.ensure_logged_in()
 
     outdir_path = Path(outdir)
     outdir_path.mkdir(parents=True, exist_ok=True)
 
     cache_dir = Path.cwd() / ".cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    use_cache = not args.no_cache
 
     console = Console()
-
-    repo_payloads: List[Dict[str, Any]] = []
-    azure_data: Dict[str, Any] = {}
-
-    for owner, repo in selected_repos:
-        console.print(f"[bold cyan]Collecting GitHub data for {owner}/{repo}[/bold cyan]")
-        console.print(f"[dim]Date range: {since_iso[:10]} to {until_iso[:10]}[/dim]\n")
-        
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[bold blue]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            console=console,
-        ) as progress:
-            pr_task = progress.add_task("[cyan]Fetching pull requests...", total=None)
-            commit_task = progress.add_task("[green]Fetching commits...", total=None)
-            
-            def on_prs_progress(status: str, count: int):
-                if status == "fetching":
-                    progress.update(pr_task, description=f"[cyan]Fetching pull requests... ({count} fetched)")
-                elif status == "complete":
-                    progress.update(pr_task, completed=100, total=100, description=f"[cyan]✓ Pull requests fetched ({count} total)")
-                elif status == "cached":
-                    progress.update(pr_task, completed=100, total=100, description=f"[cyan]✓ Pull requests (cached: {count} total)")
-            
-            def on_commits_progress(status: str, count: int):
-                if status == "fetching":
-                    progress.update(commit_task, description=f"[green]Fetching commits... ({count} fetched)")
-                elif status == "complete":
-                    progress.update(commit_task, completed=100, total=100, description=f"[green]✓ Commits fetched ({count} total)")
-                elif status == "cached":
-                    progress.update(commit_task, completed=100, total=100, description=f"[green]✓ Commits (cached: {count} total)")
-
-            data = collect.collect_repository_data(
-                owner=owner,
-                repo=repo,
-                since_iso=since_iso,
-                until_iso=until_iso,
-                token=token,
-                bots=bots,
-                cache_dir=str(cache_dir),
-                use_cache=use_cache,
-                on_prs_progress=on_prs_progress,
-                on_commits_progress=on_commits_progress,
-                on_ado_progress=None,
-                ado_org=ado_org,
-                ado_project=ado_project,
-                ado_ready_states=ado_ready_states,
-                ado_resolved_states=ado_resolved_states,
-                ado_qa_failed_states=ado_qa_failed_states,
-                ado_disable=ado_disable,
-                ado_skip_lookup=True,
-            )
-        console.print()
-
-        repo_payloads.append(data)
-
-    if not repo_payloads:
-        console.print("[red]No repository data collected.[/red]")
-        return 2
-
-    azure_data = _collect_ado_after_repos(
+    console.print(f"[bold cyan]Collecting GitHub data for {owner}/{repo}[/bold cyan]")
+    console.print(f"[dim]Date range: {since_iso[:10]} to {until_iso[:10]}[/dim]\n")
+    
+    # Set up Rich progress display
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
         console=console,
-        ado_disable=ado_disable,
-        ado_org=ado_org,
-        ado_project=ado_project,
-        ado_ready_states=ado_ready_states,
-        ado_resolved_states=ado_resolved_states,
-        ado_qa_failed_states=ado_qa_failed_states,
-        repo_payloads=repo_payloads,
-        since_iso=since_iso,
-        until_iso=until_iso,
-        cache_dir=cache_dir,
-        use_cache=use_cache,
-    )
+    ) as progress:
+        # Create tasks for PRs and commits
+        pr_task = progress.add_task("[cyan]Fetching pull requests...", total=None)
+        commit_task = progress.add_task("[green]Fetching commits...", total=None)
+        
+        # Define progress callbacks
+        def on_prs_progress(status: str, count: int):
+            if status == "fetching":
+                progress.update(pr_task, description=f"[cyan]Fetching pull requests... ({count} fetched)")
+            elif status == "complete":
+                progress.update(pr_task, completed=100, total=100, description=f"[cyan]✓ Pull requests fetched ({count} total)")
+            elif status == "cached":
+                progress.update(pr_task, completed=100, total=100, description=f"[cyan]✓ Pull requests (cached: {count} total)")
+        
+        def on_commits_progress(status: str, count: int):
+            if status == "fetching":
+                progress.update(commit_task, description=f"[green]Fetching commits... ({count} fetched)")
+            elif status == "complete":
+                progress.update(commit_task, completed=100, total=100, description=f"[green]✓ Commits fetched ({count} total)")
+            elif status == "cached":
+                progress.update(commit_task, completed=100, total=100, description=f"[green]✓ Commits (cached: {count} total)")
+        
+        # Collect data with progress callbacks
+        data = collect.collect_repository_data(
+            owner=owner,
+            repo=repo,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            token=token,
+            bots=bots,
+            cache_dir=str(cache_dir),
+            use_cache=not args.no_cache,
+            on_prs_progress=on_prs_progress,
+            on_commits_progress=on_commits_progress,
+        )
+    
+    console.print()
 
-    is_multi = len(repo_payloads) > 1
-    repo_label = "Multi-Repo" if is_multi else selected_repos[0][1]
-    owner_label = "Multiple" if is_multi else selected_repos[0][0]
-    base_tag = f"{selected_repos[0][0]}-{selected_repos[0][1]}" if selected_repos else "assessment"
-    if is_multi:
-        base_tag = f"multi-{len(selected_repos)}-repos"
-    tag = args.tag or f"{base_tag}-{now:%Y-%m-%d}"
-
-    aggregated_data = _merge_repo_payloads(
-        repos_data=repo_payloads,
-        since_iso=since_iso,
-        until_iso=until_iso,
-        azure_data=azure_data if not ado_disable else {},
-    )
-
-    console.print("\n[bold yellow]Computing metrics and scores...[/bold yellow]")
-    scores = metrics.compute_scores(
-        data=aggregated_data,
-        owner=owner_label,
-        repo=repo_label,
-        since_iso=since_iso,
-        until_iso=until_iso,
-        config=cfg,
-    )
-    azure_scores = azure_metrics.compute_scores(
-        azure_data=aggregated_data.get("azure", {}) or {},
-        config=cfg,
-    )
-
-    folder_name = report._fmt_folder_name(repo_label, until_iso)
+    tag = f"{owner}-{repo}-{now:%Y-%m-%d}"
+    
+    # Create dated subfolder for reports
+    folder_name = report._fmt_folder_name(repo, until_iso)
     report_subdir = outdir_path / folder_name
     report_subdir.mkdir(parents=True, exist_ok=True)
     
     raw_path = report_subdir / f"dev-skill-raw-{tag}.json"
-    raw_payload = {**aggregated_data, "devskill_scores": scores, "azure_assessment": azure_scores}
     with raw_path.open("w", encoding="utf-8") as f:
-        json.dump(raw_payload, f, indent=2, sort_keys=True)
+        json.dump(data, f, indent=2, sort_keys=True)
     console.print(f"[dim]Wrote raw data → {raw_path}[/dim]")
+
+    console.print("\n[bold yellow]Computing metrics and scores...[/bold yellow]")
+    scores = metrics.compute_scores(
+        data=data,
+        owner=owner,
+        repo=repo,
+        since_iso=since_iso,
+        until_iso=until_iso,
+        config=cfg,
+    )
 
     console.print("[bold magenta]Generating reports...[/bold magenta]")
     report.generate_reports(
         scores=scores,
         outdir=str(outdir_path),
-        owner=owner_label,
-        repo=repo_label,
+        owner=owner,
+        repo=repo,
         since_iso=since_iso,
         until_iso=until_iso,
         named=True,
         tag=tag,
-        repos=aggregated_data.get("repos"),
     )
     insights.generate_insights(
         scores=scores,
-        data=aggregated_data,
+        data=data,
         outdir=str(outdir_path),
-        owner=owner_label,
-        repo=repo_label,
+        owner=owner,
+        repo=repo,
         since_iso=since_iso,
         until_iso=until_iso,
         small_pr_threshold=float(((cfg.get("hygiene") or {}).get("small_pr_lines_threshold")) or 300),
         tag=tag,
-        repos=aggregated_data.get("repos"),
     )
     _print_terminal_summary(
         console=console,
         scores=scores,
-        owner=owner_label,
-        repo=repo_label,
+        owner=owner,
+        repo=repo,
         since_iso=since_iso,
         until_iso=until_iso,
         named=True,
-        azure_scores=azure_scores,
-        repo_label=repo_label,
-        repos=aggregated_data.get("repos"),
     )
-    console.print(f"\n[bold green]✓ Reports written to {report_subdir}[/bold green]\n")
+    console.print(f"\n[bold green]✓ Reports written to {report_subdir}[/bold green]")
     return 0
-
-
-def rerun_entrypoint() -> None:
-    """Console script entrypoint: rerun last query with fresh data."""
-    sys.exit(main(["rerun"] + sys.argv[1:]))
-
-
-def rerun_local_entrypoint() -> None:
-    """Console script entrypoint: regenerate from local raw data only."""
-    sys.exit(main(["rerun-local"] + sys.argv[1:]))
 
 

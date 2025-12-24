@@ -15,6 +15,15 @@ Run a 90-day GitHub developer assessment against any repository and export Markd
 pip install git+https://github.com/Benjamindodgson/dev-skill-assessment.git
 ```
 
+## Run locally
+
+From a cloned checkout, install in editable mode and start the interactive CLI:
+
+```bash
+pip install -e .
+devskill
+```
+
 ## Usage
 
 ### Interactive Mode (Recommended)
