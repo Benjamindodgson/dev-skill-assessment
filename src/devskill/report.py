@@ -52,6 +52,7 @@ def generate_reports(
     named: bool = True,
     tag: Optional[str] = None,
     repos: Optional[List[Dict[str, Any]]] = None,
+    azure_assessment: Optional[Dict[str, Any]] = None,
 ) -> None:
     out = Path(outdir)
     _ensure_dir(out)
@@ -111,6 +112,26 @@ def generate_reports(
     lines.append("- Metrics are proxies; interpret alongside context.")
     lines.append("- Weekends excluded from review responsiveness metrics.")
     lines.append("- Weights: delivery 30%, collaboration 25%, hygiene 15%, stability 30%.")
+
+    if azure_assessment:
+        people = azure_assessment.get("people") or []
+        if people:
+            lines.append("")
+            lines.append("## Azure Assessment — Per Developer")
+            lines.append("")
+            lines.append("| Ranking | Developer | Score | Resolution | Predictability | Velocity | Quality |")
+            lines.append("|---|---:|---:|---:|---:|---:|---:|")
+            sorted_people = sorted(people, key=lambda p: float(p.get("score", 0.0)), reverse=True)
+            for idx, person in enumerate(sorted_people, 1):
+                subs = person.get("subscores", {})
+                dev_name = person.get("person") or "dev-***"
+                lines.append(
+                    f"| {idx} | {dev_name} | {float(person.get('score', 0.0)):.2f} | "
+                    f"{float(subs.get('resolution', 0.0)):.2f} | "
+                    f"{float(subs.get('predictability', 0.0)):.2f} | "
+                    f"{float(subs.get('velocity', 0.0)):.2f} | "
+                    f"{float(subs.get('quality', 0.0)):.2f} |"
+                )
 
     md_path.write_text("\n".join(lines), encoding="utf-8")
 

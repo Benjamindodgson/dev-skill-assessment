@@ -214,6 +214,20 @@ def compute_scores(data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
     resolution_scores: List[float] = []
     story_points_total = 0.0
 
+    dev_map: Dict[str, Dict[str, Any]] = {}
+
+    def _ensure_dev(email: str) -> Dict[str, Any]:
+        if email not in dev_map:
+            dev_map[email] = {
+                "considered": 0,
+                "resolved": 0,
+                "qa_failed": 0,
+                "resolution_hours": [],
+                "resolution_scores": [],
+                "story_points": 0.0,
+            }
+        return dev_map[email]
+
     for item in work_items:
         fields = item.get("fields") or {}
         updates = item.get("updates") or []
@@ -228,6 +242,7 @@ def compute_scores(data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
             counts["excluded_emails"] += 1
             continue
 
+        dev_stats = _ensure_dev(assignee_email)
         created_at = _parse_dt(fields.get("System.CreatedDate"))
         resolved_at = _state_time_from_updates(updates, resolved_states, created_at)
         if not resolved_at:
@@ -239,19 +254,25 @@ def compute_scores(data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
                 resolved_at = None
 
         counts["considered"] += 1
+        dev_stats["considered"] += 1
         qa_failed = _has_state_hit(updates, qa_failed_states)
         if qa_failed:
             counts["qa_failed"] += 1
+            dev_stats["qa_failed"] += 1
 
         if resolved_at:
             counts["resolved"] += 1
+            dev_stats["resolved"] += 1
             delta_h = _business_hours_between(created_at, resolved_at, skip_weekends=use_business_days)
             if delta_h >= 0:
                 resolution_hours.append(delta_h)
+                dev_stats["resolution_hours"].append(delta_h)
             story_points_total += float(fields.get(effort_field, 0.0) or 0.0)
+            dev_stats["story_points"] += float(fields.get(effort_field, 0.0) or 0.0)
             counts["resolution_items"] += 1
 
             work_item_type = str(fields.get("System.WorkItemType") or "").strip().lower()
+            score = 0.0
             if work_item_type in bug_types:
                 counts["resolution_bug_items"] += 1
                 target_hours = bug_priority_hours.get(_norm_priority(fields.get(priority_field)))
@@ -260,12 +281,13 @@ def compute_scores(data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
                     score = 100.0 if delta_h <= target_hours else 0.0
                     if score == 100.0:
                         counts["resolution_bug_sla_met"] += 1
-                else:
-                    score = 0.0
                 resolution_scores.append(score)
+                dev_stats["resolution_scores"].append(score)
             else:
                 counts["resolution_pbi_items"] += 1
-                resolution_scores.append(_score_pbi(delta_h))
+                score = _score_pbi(delta_h)
+                resolution_scores.append(score)
+                dev_stats["resolution_scores"].append(score)
 
     resolution_hours_median = _median(resolution_hours)
     resolution_score_avg = sum(resolution_scores) / len(resolution_scores) if resolution_scores else 0.0
@@ -303,6 +325,51 @@ def compute_scores(data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
         2,
     )
 
+    people: List[Dict[str, Any]] = []
+    for email, stats in dev_map.items():
+        if stats["considered"] <= 0:
+            continue
+        dev_resolution_median = _median(stats["resolution_hours"])
+        dev_resolution_score_avg = (
+            sum(stats["resolution_scores"]) / len(stats["resolution_scores"]) if stats["resolution_scores"] else 0.0
+        )
+        dev_predictability_rate = stats["resolved"] / stats["considered"] if stats["considered"] else 0.0
+        dev_velocity_points_per_week = stats["story_points"] / window_weeks if window_weeks > 0 else 0.0
+        dev_qa_pass_rate = (
+            (stats["resolved"] - stats["qa_failed"]) / stats["resolved"] if stats["resolved"] else 0.0
+        )
+
+        dev_resolution_score = dev_resolution_score_avg
+        dev_predictability_score = 100.0 * _clamp01(dev_predictability_rate)
+        dev_velocity_score = 100.0 * _clamp01(dev_velocity_points_per_week / velocity_target)
+        dev_quality_score = 100.0 * _clamp01(dev_qa_pass_rate)
+
+        dev_overall = round(
+            (dev_resolution_score + dev_predictability_score + dev_velocity_score + dev_quality_score) / 4.0, 2
+        )
+
+        people.append(
+            {
+                "person": email,
+                "score": dev_overall,
+                "subscores": {
+                    "resolution": round(dev_resolution_score, 2),
+                    "predictability": round(dev_predictability_score, 2),
+                    "velocity": round(dev_velocity_score, 2),
+                    "quality": round(dev_quality_score, 2),
+                },
+                "metrics": {
+                    "considered": stats["considered"],
+                    "resolved": stats["resolved"],
+                    "qa_failed": stats["qa_failed"],
+                    "resolution_hours_median": round(dev_resolution_median, 2),
+                    "velocity_points_per_week": round(dev_velocity_points_per_week, 4),
+                },
+            }
+        )
+
+    people.sort(key=lambda p: float(p.get("score", 0.0)), reverse=True)
+
     return {
         "team": {
             "org": data.get("org"),
@@ -329,5 +396,6 @@ def compute_scores(data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
             },
         },
         "counts": counts,
+        "people": people,
     }
 

@@ -434,6 +434,34 @@ def _print_azure_summary(console: Console, assessment: Optional[Dict[str, Any]])
         f"Excluded (unassigned/emails): {counts.get('excluded', 0)}[/dim]"
     )
 
+    people = assessment.get("people") or []
+    if not people:
+        return
+
+    dev_table = Table(box=ROUNDED, header_style="bold magenta", show_lines=False)
+    dev_table.add_column("#", justify="right")
+    dev_table.add_column("Developer", justify="left")
+    dev_table.add_column("Score", justify="right")
+    dev_table.add_column("Resolution", justify="right")
+    dev_table.add_column("Predictability", justify="right")
+    dev_table.add_column("Velocity", justify="right")
+    dev_table.add_column("Quality", justify="right")
+
+    sorted_people = sorted(people, key=lambda p: float(p.get("score", 0.0)), reverse=True)
+    for idx, person in enumerate(sorted_people, 1):
+        subs = person.get("subscores", {})
+        dev_table.add_row(
+            str(idx),
+            str(person.get("person") or "unknown"),
+            f"{float(person.get('score', 0.0)):.2f}",
+            f"{float(subs.get('resolution', 0.0)):.2f}",
+            f"{float(subs.get('predictability', 0.0)):.2f}",
+            f"{float(subs.get('velocity', 0.0)):.2f}",
+            f"{float(subs.get('quality', 0.0)):.2f}",
+        )
+
+    console.print(dev_table)
+
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser("devskill")
@@ -535,6 +563,7 @@ def main(argv=None) -> int:
             until_iso=until_iso,
             named=not getattr(args, "anonymous", False),
             tag=tag,
+            azure_assessment=azure_assessment,
         )
         insights.generate_insights(
             scores=scores,
@@ -834,6 +863,7 @@ def main(argv=None) -> int:
         until_iso=until_iso,
         named=True,
         tag=tag,
+        azure_assessment=azure_assessment,
     )
     insights.generate_insights(
         scores=scores,
